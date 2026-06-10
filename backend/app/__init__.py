@@ -1,0 +1,1 @@
+"""Knowledge Hubs backend application."""

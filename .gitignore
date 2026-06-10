@@ -1,0 +1,32 @@
+node_modules/
+.next/
+dist/
+build/
+*.log
+
+# Secrets — never commit these
+.env
+.env.bak
+.env.local
+setup/keycloak/realm.json.rendered
+setup/keycloak/realm-rendered.json
+
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# TLS certs (managed by Traefik volume)
+*.pem
+*.key
+*.crt
