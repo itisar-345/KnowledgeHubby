@@ -12,6 +12,7 @@ from app.services.curation_layer import CurationLayer
 from app.services.graph_builder import GraphBuilder
 from app.services.ingestion_normalization import IngestionNormalization
 from app.services.knowledge_extraction import KnowledgeExtraction
+from app.services.neo4j_graph import Neo4jGraphStore
 from app.store import JsonKnowledgeStore
 
 
@@ -30,6 +31,7 @@ ingestion = IngestionNormalization()
 extractor = KnowledgeExtraction()
 graph_builder = GraphBuilder(None)
 curation = CurationLayer()
+neo4j_graph = Neo4jGraphStore()
 
 
 class ArtifactRequest(BaseModel):
@@ -120,8 +122,12 @@ def _build_relationships(artifact_id: str, items: List[Dict[str, Any]]) -> List[
 
 
 @app.get("/health")
-async def health() -> Dict[str, str]:
-    return {"status": "healthy"}
+async def health() -> Dict[str, Any]:
+    return {
+        "status": "healthy",
+        "storage": "json",
+        "neo4j": "connected" if neo4j_graph.verify() else "disabled",
+    }
 
 
 @app.get("/knowledge")
@@ -153,13 +159,24 @@ async def ingest_artifact(request: ArtifactRequest) -> Dict[str, Any]:
     data["knowledge_items"] = [
         item for item in data["knowledge_items"] if item["id"] not in existing_item_ids
     ] + items
-    data["relationships"].extend(relationships)
+    relationship_keys = {(relationship["from"], relationship["to"], relationship["type"]) for relationship in relationships}
+    data["relationships"] = [
+        relationship
+        for relationship in data["relationships"]
+        if (relationship["from"], relationship["to"], relationship["type"]) not in relationship_keys
+    ] + relationships
     store.replace(data)
+    neo4j_graph.upsert_artifact_graph(artifact, items, relationships)
 
     return {
         "artifact": artifact,
         "items": items,
         "relationships": relationships,
+        "quality": {
+            "extracted_items": len(items),
+            "items_with_confidence": sum(1 for item in items if item.get("details", {}).get("confidence") is not None),
+            "neo4j_synced": neo4j_graph.enabled,
+        },
     }
 
 
@@ -172,6 +189,11 @@ async def create_playbook(request: PlaybookRequest) -> Dict[str, Any]:
 
 @app.get("/knowledge/graph")
 async def knowledge_graph() -> Dict[str, Any]:
+    if neo4j_graph.enabled and neo4j_graph.verify():
+        neo4j_data = neo4j_graph.visualization_data()
+        if neo4j_data["nodes"]:
+            return neo4j_data
+
     data = store.all()
     nodes = [
         {"id": artifact["id"], "label": artifact["title"], "type": "artifact"}
@@ -184,3 +206,8 @@ async def knowledge_graph() -> Dict[str, Any]:
         "nodes": nodes,
         "edges": data["relationships"],
     })
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    neo4j_graph.close()
