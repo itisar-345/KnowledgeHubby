@@ -1,5 +1,7 @@
 import './globals.css'
 import ErrorBoundary from '@/components/ErrorBoundary'
+import { AuthProvider } from '@/lib/auth'
+import NavBar from '@/components/NavBar'
 
 export const metadata = {
   title: 'Knowledge Hubs',
@@ -10,15 +12,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <nav className="nav">
-          <h1>Knowledge Hubs</h1>
-          <div className="nav-links">
-            <a href="/knowledge">Hub</a>
-          </div>
-        </nav>
-        <main>
-          <ErrorBoundary>{children}</ErrorBoundary>
-        </main>
+        <AuthProvider>
+          <NavBar />
+          <main>
+            <ErrorBoundary>{children}</ErrorBoundary>
+          </main>
+        </AuthProvider>
       </body>
     </html>
   )

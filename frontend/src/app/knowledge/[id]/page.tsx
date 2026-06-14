@@ -1,10 +1,9 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { use, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { ArrowLeft, BookOpen, FileText, GitBranch, Lightbulb, Network, ShieldAlert, Tags, User } from 'lucide-react'
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
+import { useAuth, API_BASE } from '@/lib/auth'
 
 type Artifact = {
   id: string
@@ -49,21 +48,24 @@ const typeIcons = {
   'how-to': BookOpen,
 }
 
-export default function KnowledgeDetailPage({ params }: { params: { id: string } }) {
+export default function KnowledgeDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [data, setData] = useState<KnowledgeResponse | null>(null)
   const [error, setError] = useState('')
 
+  const { token } = useAuth()
+
   useEffect(() => {
+    if (!token) return
     async function loadKnowledge() {
-      const response = await fetch(`${API_BASE}/knowledge`)
+      const response = await fetch(`${API_BASE}/knowledge`, { headers: { Authorization: `Bearer ${token}` } })
       if (!response.ok) throw new Error(`Knowledge API returned ${response.status}`)
       setData(await response.json())
     }
-
     loadKnowledge().catch(err => setError(err instanceof Error ? err.message : 'Could not load knowledge item'))
-  }, [])
+  }, [token])
 
-  const item = useMemo(() => data?.knowledge_items.find(entry => entry.id === params.id), [data, params.id])
+  const { id } = use(params)
+  const item = useMemo(() => data?.knowledge_items.find(entry => entry.id === id), [data, id])
   const artifact = useMemo(() => data?.artifacts.find(entry => entry.id === item?.artifact_id), [data, item?.artifact_id])
   const relationships = useMemo(() => {
     if (!data || !item) return []

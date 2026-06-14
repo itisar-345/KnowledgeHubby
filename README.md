@@ -47,9 +47,12 @@ Knowledge Hubs
 ## Tech Stack
 
 - **Frontend**: Next.js, React, TypeScript, lucide-react
-- **Backend**: FastAPI, Pydantic, Uvicorn
-- **Storage**: local JSON file at `backend/data/knowledge_store.json`
+- **Backend**: FastAPI, Pydantic, Uvicorn, SQLite (workspace storage)
+- **Graph layer (optional)**: Neo4j (vector index + relationship graph)
+- **LLM integration (optional)**: OpenAI for transcript ingestion and extraction
+- **Storage**: local DB + graph (optional) — JSON file is supported in the simpler local mode
 - **Runtime**: Docker Compose or local Node/Python processes
+
 
 ## Run Locally
 
@@ -157,14 +160,10 @@ The default persistence layer is intentionally simple so the product can run loc
 
 ## Development Notes
 
+> **In progress**: the project is evolving from a simple JSON-backed local store toward a workspace-based backend (SQLite + optional Neo4j) with LLM-assisted transcript ingestion.
+
 - Backend CORS is configured for the local frontend on ports `3000` and `8000`.
 - Extracted IDs are deterministic hashes based on artifact content and extracted item titles.
 - The current extraction services are lightweight and deterministic; they are designed to be replaced or extended with richer NLP or LLM-backed extraction.
 - Docker mounts `backend/data` so local knowledge persists across container rebuilds.
-
-## Roadmap
-
-- import support for files and external sources
-- database-backed persistence option
-- authentication and workspace separation
-- human review workflow for accepting or editing extracted knowledge
+- A Neo4j-backed graph layer is included (optional) to support relationship-oriented graph queries and visualization.

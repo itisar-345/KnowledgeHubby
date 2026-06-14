@@ -5,6 +5,9 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/data:/app/data
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///./data/knowledge.db
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
 
   frontend:
     build: ./frontend

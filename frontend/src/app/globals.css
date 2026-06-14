@@ -800,3 +800,101 @@ textarea:focus {
     font-size: 1.35rem;
   }
 }
+
+/* Auth */
+.auth-shell {
+  display: grid;
+  place-items: center;
+  min-height: calc(100vh - 80px);
+}
+
+.auth-card {
+  background: #fff;
+  border: 1px solid #dfe7e5;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 2rem;
+  width: 100%;
+  max-width: 400px;
+}
+
+.auth-card h2 {
+  font-size: 1.4rem;
+}
+
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Review */
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.review-card {
+  background: #fff;
+  border: 1px solid #dfe7e5;
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+.review-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.review-badge {
+  background: #fff3cd;
+  border-radius: 4px;
+  color: #856404;
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-top: 0.5rem;
+  padding: 0.2rem 0.4rem;
+  display: inline-block;
+}
+
+/* Search page */
+.search-controls {
+  background: #fff;
+  border: 1px solid #dfe7e5;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  align-items: center;
+}
+
+.search-controls .search-box {
+  flex: 1;
+  min-width: 200px;
+}
+
+.search-controls select,
+.search-controls input:not(.search-box input) {
+  min-width: 140px;
+}
+
+/* Transcript summary */
+.summary-box {
+  background: #f0f7ff;
+  border: 1px solid #b8d4f5;
+  border-radius: 6px;
+  color: #1a3a5c;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  padding: 0.85rem 1rem;
+}
+
+/* action-item pill color */
+.type-pill:has(svg ~ *) {
+  /* handled generically — action-item uses same pill style */
+}

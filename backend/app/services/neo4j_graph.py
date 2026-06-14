@@ -5,8 +5,11 @@ from typing import Any, Dict, List, Optional
 
 try:
     from neo4j import GraphDatabase
-except ImportError:  # pragma: no cover - keeps local JSON mode working without the driver
+except ImportError:
     GraphDatabase = None
+
+
+EMBEDDING_DIM = 1536  # text-embedding-3-small dimension
 
 
 class Neo4jGraphStore:
@@ -43,6 +46,31 @@ class Neo4jGraphStore:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Vector index bootstrap
+    # ------------------------------------------------------------------
+
+    def ensure_vector_index(self) -> None:
+        """Create the Neo4j vector index for KnowledgeItem embeddings if absent."""
+        if not self.driver:
+            return
+        with self.driver.session(database=self.database) as session:
+            session.run("""
+                CREATE VECTOR INDEX knowledge_item_embeddings IF NOT EXISTS
+                FOR (n:KnowledgeItem)
+                ON n.embedding
+                OPTIONS {
+                    indexConfig: {
+                        `vector.dimensions`: $dim,
+                        `vector.similarity_function`: 'cosine'
+                    }
+                }
+            """, dim=EMBEDDING_DIM)
+
+    # ------------------------------------------------------------------
+    # Ingest
+    # ------------------------------------------------------------------
+
     def upsert_artifact_graph(
         self,
         artifact: Dict[str, Any],
@@ -51,9 +79,139 @@ class Neo4jGraphStore:
     ) -> None:
         if not self.driver:
             return
-
         with self.driver.session(database=self.database) as session:
             session.execute_write(self._upsert_artifact_graph, artifact, items, relationships)
+
+    def upsert_item_embedding(self, item_id: str, embedding: List[float]) -> None:
+        """Store a pre-computed embedding vector on a KnowledgeItem node."""
+        if not self.driver:
+            return
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                MATCH (n:KnowledgeItem {id: $id})
+                CALL db.create.setNodeVectorProperty(n, 'embedding', $embedding)
+                """,
+                id=item_id,
+                embedding=embedding,
+            )
+
+    # ------------------------------------------------------------------
+    # GraphRAG retrieval
+    # ------------------------------------------------------------------
+
+    def vector_search(self, query_embedding: List[float], top_k: int = 8) -> List[Dict[str, Any]]:
+        """
+        Return the top_k KnowledgeItem nodes most similar to the query embedding.
+        Each result: {id, title, kind, score}
+        """
+        if not self.driver:
+            return []
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                CALL db.index.vector.queryNodes('knowledge_item_embeddings', $top_k, $embedding)
+                YIELD node, score
+                RETURN node.id AS id,
+                       node.title AS title,
+                       node.kind AS kind,
+                       node.artifact_id AS artifact_id,
+                       node.tags AS tags,
+                       score
+                """,
+                top_k=top_k,
+                embedding=query_embedding,
+            )
+            return [dict(r) for r in result]
+
+    def graph_expand(self, item_ids: List[str], hops: int = 2) -> List[Dict[str, Any]]:
+        """
+        Starting from seed item_ids, walk up to `hops` relationship hops
+        and return neighbouring nodes with their relationship context.
+        """
+        if not self.driver or not item_ids:
+            return []
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (seed:KnowledgeItem)
+                WHERE seed.id IN $ids
+                CALL apoc.path.subgraphNodes(seed, {
+                    maxLevel: $hops,
+                    labelFilter: 'KnowledgeItem|Artifact'
+                })
+                YIELD node
+                RETURN DISTINCT
+                    node.id        AS id,
+                    node.title     AS title,
+                    node.kind      AS kind,
+                    node.artifact_id AS artifact_id,
+                    labels(node)   AS labels
+                """,
+                ids=item_ids,
+                hops=hops,
+            )
+            return [dict(r) for r in result]
+
+    def graph_expand_fallback(self, item_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        APOC-free neighbour expansion — used when APOC is not installed.
+        Walks one hop via any relationship from seed nodes.
+        """
+        if not self.driver or not item_ids:
+            return []
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (seed:KnowledgeItem)-[r]-(neighbour)
+                WHERE seed.id IN $ids
+                  AND (neighbour:KnowledgeItem OR neighbour:Artifact)
+                RETURN DISTINCT
+                    neighbour.id        AS id,
+                    neighbour.title     AS title,
+                    neighbour.kind      AS kind,
+                    neighbour.artifact_id AS artifact_id,
+                    labels(neighbour)   AS labels
+                """,
+                ids=item_ids,
+            )
+            return [dict(r) for r in result]
+
+    def retrieve_for_rag(
+        self,
+        query_embedding: List[float],
+        top_k: int = 8,
+        expand_hops: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """
+        Full GraphRAG retrieval:
+          1. Vector similarity search → seed nodes
+          2. Graph expansion from seeds → neighbourhood context
+          3. Deduplicate and return unified context list
+        """
+        seeds = self.vector_search(query_embedding, top_k=top_k)
+        seed_ids = [s["id"] for s in seeds]
+
+        try:
+            neighbours = self.graph_expand(seed_ids, hops=expand_hops)
+        except Exception:
+            neighbours = self.graph_expand_fallback(seed_ids)
+
+        seen: set[str] = set()
+        combined: List[Dict[str, Any]] = []
+        for node in seeds:
+            if node["id"] not in seen:
+                seen.add(node["id"])
+                combined.append({**node, "retrieved_by": "vector"})
+        for node in neighbours:
+            if node.get("id") and node["id"] not in seen:
+                seen.add(node["id"])
+                combined.append({**node, "retrieved_by": "graph", "score": 0.0})
+        return combined
+
+    # ------------------------------------------------------------------
+    # Visualization
+    # ------------------------------------------------------------------
 
     def visualization_data(self) -> Dict[str, Any]:
         if not self.driver:
@@ -76,29 +234,35 @@ class Neo4jGraphStore:
             label: type(r)
           }) AS edges
         """
-
         with self.driver.session(database=self.database) as session:
             record = session.run(query).single()
             if not record:
                 return {"nodes": [], "edges": [], "layout": "force-directed"}
-            edges = [edge for edge in record["edges"] if edge.get("source") and edge.get("target")]
+            edges = [e for e in record["edges"] if e.get("source") and e.get("target")]
             return {"nodes": record["nodes"], "edges": edges, "layout": "force-directed"}
 
+    # ------------------------------------------------------------------
+    # Internal write
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _upsert_artifact_graph(tx, artifact: Dict[str, Any], items: List[Dict[str, Any]], relationships: List[Dict[str, Any]]) -> None:
+    def _upsert_artifact_graph(
+        tx,
+        artifact: Dict[str, Any],
+        items: List[Dict[str, Any]],
+        relationships: List[Dict[str, Any]],
+    ) -> None:
         tx.run(
             """
-            MERGE (artifact:Artifact {id: $id})
-            SET artifact.title = $title,
-                artifact.source = $source,
-                artifact.author = $author,
-                artifact.created_at = $created_at,
-                artifact.tags = $tags,
-                artifact.kind = 'artifact'
+            MERGE (a:Artifact {id: $id})
+            SET a.title = $title, a.source = $source, a.source_type = $source_type,
+                a.author = $author, a.created_at = $created_at,
+                a.tags = $tags, a.kind = 'artifact'
             """,
             id=artifact["id"],
             title=artifact["title"],
             source=artifact.get("source", "manual"),
+            source_type=artifact.get("source_type", "manual"),
             author=artifact.get("author", "unknown"),
             created_at=artifact.get("created_at"),
             tags=artifact.get("tags", []),
@@ -107,14 +271,10 @@ class Neo4jGraphStore:
         for item in items:
             tx.run(
                 """
-                MERGE (item:KnowledgeItem {id: $id})
-                SET item.title = $title,
-                    item.kind = $kind,
-                    item.author = $author,
-                    item.date = $date,
-                    item.tags = $tags,
-                    item.confidence = $confidence,
-                    item.artifact_id = $artifact_id
+                MERGE (n:KnowledgeItem {id: $id})
+                SET n.title = $title, n.kind = $kind, n.author = $author,
+                    n.date = $date, n.tags = $tags,
+                    n.confidence = $confidence, n.artifact_id = $artifact_id
                 """,
                 id=item["id"],
                 title=item["title"],
@@ -126,15 +286,15 @@ class Neo4jGraphStore:
                 artifact_id=item.get("artifact_id"),
             )
 
-        for relationship in relationships:
+        for rel in relationships:
             tx.run(
                 """
-                MATCH (source {id: $source_id})
-                MATCH (target {id: $target_id})
-                MERGE (source)-[rel:CONTAINS]->(target)
-                SET rel.kind = $kind
+                MATCH (s {id: $from_id})
+                MATCH (t {id: $to_id})
+                MERGE (s)-[r:CONTAINS]->(t)
+                SET r.kind = $kind
                 """,
-                source_id=relationship["from"],
-                target_id=relationship["to"],
-                kind=relationship.get("type", "CONTAINS"),
+                from_id=rel["from"],
+                to_id=rel["to"],
+                kind=rel.get("type", "CONTAINS"),
             )
