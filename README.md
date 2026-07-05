@@ -2,7 +2,7 @@
 
 Knowledge Hubs is a local-first product for turning team knowledge into reusable operational memory. Paste meeting notes, project writeups, retrospectives, process docs, or decision logs, and the app extracts structured knowledge such as decisions, risks, checklists, lessons, how-to patterns, and best practices.
 
-The product includes a FastAPI backend, a JSON-backed local knowledge store, and a Next.js workspace for ingesting and browsing extracted knowledge.
+The product includes a FastAPI backend, a Neo4j-backed knowledge graph, and a Next.js workspace for ingesting and browsing extracted knowledge.
 
 ## Product Positioning
 
@@ -13,18 +13,20 @@ Use it for:
 - capturing decisions and lessons from meetings or retrospectives
 - turning project notes into checklists and how-to guidance
 - identifying risks, success factors, and best practices from team documents
-- building a local knowledge base without requiring an external database
+- building a persistent knowledge graph with rich relationship traversal
 
 ## Core Capabilities
 
 - **Artifact ingestion**: submit manual notes, documents, summaries, or process text.
 - **Knowledge extraction**: identify decisions, risks, best practices, lessons, checklists, and how-to items.
-- **Local persistence**: store artifacts, extracted items, relationships, and playbooks in JSON.
+- **Graph persistence**: store artifacts, extracted items, relationships, and playbooks in Neo4j.
 - **Knowledge browser**: search and filter extracted knowledge in the Next.js UI.
 - **Knowledge item details**: inspect extracted metadata, source artifacts, tags, and relationships.
 - **Graph-ready API**: expose relationship data for knowledge graph visualizations.
 - **Frontend graph visualization**: browse artifact-to-knowledge relationships from the hub.
 - **Playbook support**: create curated playbooks from structured steps.
+- **OKF import/export**: ingest and export knowledge using a Google-style Open Knowledge Format payload.
+- **RAG queries**: ask natural-language questions over the workspace and receive grounded answers from the retrieved knowledge.
 
 ## Product Architecture
 
@@ -33,24 +35,25 @@ Knowledge Hubs
 +-- backend/                 FastAPI service and extraction pipeline
 |   +-- app/
 |   |   +-- main.py           API routes and ingestion orchestration
-|   |   +-- store.py          JSON persistence layer
+|   |   +-- store.py          Neo4j persistence layer
 |   |   +-- services/         Extraction, normalization, graph, and curation services
-|   +-- data/                 Local knowledge store
-+-- frontend/                Next.js product UI
+|   +-- data/                 Fallback local store (SQLite, optional)
++-- frontend/                Angular product UI
 |   +-- src/
-|       +-- app/              App routes and global shell
-|       +-- components/       Shared UI components
+|       +-- app/
+|           +-- pages/        Route components (knowledge, login, review, search, graphrag)
+|           +-- services/     AuthService and auth guard
 +-- docker-compose.yml        Full product runtime
-+-- .env.example              Frontend API configuration
++-- .env.example              Environment configuration
 ```
 
 ## Tech Stack
 
-- **Frontend**: Next.js, React, TypeScript, lucide-react
-- **Backend**: FastAPI, Pydantic, Uvicorn, SQLite (workspace storage)
-- **Graph layer (optional)**: Neo4j (vector index + relationship graph)
+- **Frontend**: Angular 17, TypeScript
+- **Backend**: FastAPI, Pydantic, Uvicorn, Neo4j (primary graph store)
+- **Fallback storage (optional)**: SQLite for local-only or offline mode
 - **LLM integration (optional)**: OpenAI for transcript ingestion and extraction
-- **Storage**: local DB + graph (optional) — JSON file is supported in the simpler local mode
+- **Storage**: Neo4j graph (default) — SQLite is supported as a lightweight fallback
 - **Runtime**: Docker Compose or local Node/Python processes
 
 
@@ -91,13 +94,13 @@ curl http://localhost:8000/health
 ```bash
 cd frontend
 npm install
-npm run dev
+npm start
 ```
 
 Open the product at:
 
 ```text
-http://localhost:3000
+http://localhost:4200
 ```
 
 ## Run With Docker
@@ -147,6 +150,18 @@ Creates a curated playbook from structured steps.
 
 Returns graph visualization data built from artifacts, knowledge items, and relationships.
 
+### `POST /knowledge/okf/import`
+
+Imports an OKF-style JSON payload with nodes and edges into the workspace knowledge store.
+
+### `GET /knowledge/okf/export`
+
+Exports the current workspace into an OKF-style JSON payload for downstream tooling.
+
+### `POST /knowledge/graphrag/query`
+
+Runs the Retrieval-Augmented Generation pipeline over the workspace knowledge and returns a grounded answer with citations and context nodes.
+
 ## Data Model
 
 Knowledge Hubs stores four primary collections:
@@ -156,14 +171,14 @@ Knowledge Hubs stores four primary collections:
 - **Relationships**: links between artifacts and extracted knowledge items.
 - **Playbooks**: curated reusable workflows.
 
-The default persistence layer is intentionally simple so the product can run locally without setup. For production use, the store can be replaced with a database-backed implementation behind the same persistence boundary.
+The default persistence layer is Neo4j, which supports rich relationship traversal, graph queries, and optional vector indexing. For lightweight or offline use, the store can be swapped to SQLite behind the same persistence boundary.
 
 ## Development Notes
 
-> **In progress**: the project is evolving from a simple JSON-backed local store toward a workspace-based backend (SQLite + optional Neo4j) with LLM-assisted transcript ingestion.
+> **In progress**: the project is evolving toward a Neo4j-primary backend with LLM-assisted transcript ingestion and optional SQLite fallback for local-only deployments.
 
 - Backend CORS is configured for the local frontend on ports `3000` and `8000`.
 - Extracted IDs are deterministic hashes based on artifact content and extracted item titles.
 - The current extraction services are lightweight and deterministic; they are designed to be replaced or extended with richer NLP or LLM-backed extraction.
-- Docker mounts `backend/data` so local knowledge persists across container rebuilds.
-- A Neo4j-backed graph layer is included (optional) to support relationship-oriented graph queries and visualization.
+- Docker runs Neo4j as the primary store; `backend/data` is mounted for SQLite fallback persistence across container rebuilds.
+- Set `STORAGE_BACKEND=sqlite` in your environment to switch to the SQLite fallback without code changes.

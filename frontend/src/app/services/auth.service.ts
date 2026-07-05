@@ -1,0 +1,41 @@
+import { Injectable, signal, computed } from '@angular/core'
+import { HttpClient, HttpParams } from '@angular/common/http'
+import { firstValueFrom } from 'rxjs'
+
+export const API_BASE = ''
+
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private _token = signal<string | null>(localStorage.getItem('kh_token'))
+  readonly token = this._token.asReadonly()
+  readonly isLoggedIn = computed(() => !!this._token())
+
+  constructor(private http: HttpClient) {}
+
+  authHeaders(): Record<string, string> {
+    const t = this._token()
+    return t ? { Authorization: `Bearer ${t}` } : {}
+  }
+
+  async login(username: string, password: string): Promise<void> {
+    const body = new HttpParams().set('username', username).set('password', password)
+    const data: any = await firstValueFrom(
+      this.http.post(`${API_BASE}/auth/token`, body.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      })
+    )
+    localStorage.setItem('kh_token', data.access_token)
+    this._token.set(data.access_token)
+  }
+
+  async register(username: string, password: string, workspace: string): Promise<void> {
+    await firstValueFrom(
+      this.http.post(`${API_BASE}/auth/register`, { username, password, workspace_id: workspace })
+    )
+  }
+
+  logout(): void {
+    localStorage.removeItem('kh_token')
+    this._token.set(null)
+  }
+}

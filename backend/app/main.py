@@ -21,9 +21,11 @@ from app.auth import (
 )
 from app.db import (
     Artifact,
+    ArtifactSummary,
     CrossLink,
     KnowledgeItem,
     Playbook,
+    QueryLog,
     Relationship,
     User,
     get_session,
@@ -33,11 +35,12 @@ from app.services.cross_source_linker import find_cross_links
 from app.services.curation_layer import CurationLayer
 from app.services.file_ingestion import extract_text_from_upload, fetch_url
 from app.services.graph_builder import GraphBuilder
-from app.services.graphrag import embed_items, graphrag_query
+from app.services.graphrag import embed_items, graphrag_query, embed
 from app.services.ingestion_normalization import IngestionNormalization
 from app.services.knowledge_extraction import KnowledgeExtraction
 from app.services.llm_extraction import extract_from_transcript
 from app.services.neo4j_graph import Neo4jGraphStore
+from app.services.okf import export_okf_payload, normalize_okf_payload
 
 app = FastAPI(title="Knowledge Hubs")
 
@@ -291,6 +294,106 @@ async def list_knowledge(
     }
 
 
+@app.post("/knowledge/okf/import")
+async def import_okf_payload(
+    payload: Dict[str, Any],
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    normalized = normalize_okf_payload(payload)
+    artifact_id = _stable_id("artifact", f"{normalized['title']}:{normalized['content']}")
+    created_at = datetime.utcnow().isoformat()
+
+    artifact_dict = {
+        "id": artifact_id,
+        "title": normalized["title"],
+        "content": normalized["content"],
+        "source": normalized["source"],
+        "source_type": normalized["source_type"],
+        "author": normalized["author"],
+        "tags": normalized["tags"],
+        "created_at": created_at,
+    }
+    metadata = {**ingestion.extract_metadata({**artifact_dict, "type": "text"}), **normalized["metadata"]}
+
+    items, relationships = await _persist_artifact(
+        session=session,
+        workspace_id=current_user.workspace_id,
+        artifact_id=artifact_id,
+        title=normalized["title"],
+        content=normalized["content"],
+        source=normalized["source"],
+        source_type=normalized["source_type"],
+        author=normalized["author"],
+        tags=normalized["tags"],
+        created_at=created_at,
+        metadata=metadata,
+    )
+
+    for item in normalized["items"]:
+        item_id = _stable_id("okf", f"{artifact_id}:{item['title']}")
+        item_payload = {
+            "id": item_id,
+            "artifact_id": artifact_id,
+            "title": item["title"][:180],
+            "type": item["type"].replace(" ", "-").lower() or "knowledge-item",
+            "author": item.get("author", normalized["author"]),
+            "date": created_at,
+            "tags": item.get("tags", normalized["tags"]),
+            "details": {**item.get("details", {}), "okf_source": item.get("source", normalized["source"]), "okf_original_id": item.get("id")},
+            "workspace_id": current_user.workspace_id,
+            "review_status": "pending",
+        }
+        existing = await session.get(KnowledgeItem, item_payload["id"])
+        if existing:
+            existing.title = item_payload["title"]
+            existing.details = item_payload["details"]
+            existing.tags = item_payload["tags"]
+        else:
+            session.add(KnowledgeItem(
+                id=item_payload["id"],
+                workspace_id=current_user.workspace_id,
+                artifact_id=artifact_id,
+                title=item_payload["title"],
+                type=item_payload["type"],
+                author=item_payload["author"],
+                date=item_payload["date"],
+                tags=item_payload["tags"],
+                details=item_payload["details"],
+                review_status=item_payload["review_status"],
+            ))
+
+    for rel in normalized["relationships"]:
+        session.add(Relationship(
+            id=str(uuid.uuid4()),
+            workspace_id=current_user.workspace_id,
+            from_id=rel["source"],
+            to_id=rel["target"],
+            type=rel["type"],
+        ))
+
+    await session.commit()
+    neo4j_graph.upsert_artifact_graph(artifact_dict, items, relationships)
+    await _embed_and_store(items, session)
+    await _build_artifact_summary(session, current_user.workspace_id, artifact_dict, normalized["content"])
+    return {"artifact": artifact_dict, "imported_items": len(normalized["items"]), "relationships": len(normalized["relationships"])}
+
+
+@app.get("/knowledge/okf/export")
+async def export_okf(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    ws = current_user.workspace_id
+    artifacts = (await session.execute(select(Artifact).where(Artifact.workspace_id == ws))).scalars().all()
+    items = (await session.execute(select(KnowledgeItem).where(KnowledgeItem.workspace_id == ws))).scalars().all()
+    rels = (await session.execute(select(Relationship).where(Relationship.workspace_id == ws))).scalars().all()
+    artifact_payloads = [_artifact_dict(a) for a in artifacts]
+    item_payloads = [_item_dict(i) for i in items]
+    relationship_payloads = [{"from": r.from_id, "to": r.to_id, "type": r.type} for r in rels]
+    return export_okf_payload(ws, artifact_payloads, item_payloads, relationship_payloads)
+
+
 # ---------------------------------------------------------------------------
 # Knowledge – ingest (text)
 # ---------------------------------------------------------------------------
@@ -395,17 +498,70 @@ async def _ingest(
     metadata = ingestion.extract_metadata(normalized)
     items, relationships = await _persist_artifact(session, workspace_id, artifact_id, title, content, source, source_type, author, tags, created_at, metadata)
     neo4j_graph.upsert_artifact_graph(artifact_dict, items, relationships)
-    await _embed_and_store(items)
+    await _embed_and_store(items, session)
+    await _build_artifact_summary(session, workspace_id, artifact_dict, content)
     return {"artifact": artifact_dict, "items": items, "relationships": relationships, "extracted_count": len(items)}
 
 
-async def _embed_and_store(items: List[Dict[str, Any]]) -> None:
-    """Embed extracted items and push vectors to Neo4j."""
-    if not neo4j_graph.enabled:
-        return
+async def _embed_and_store(
+    items: List[Dict[str, Any]], session: AsyncSession
+) -> None:
+    """
+    Embed extracted items and persist vectors to both Neo4j (primary) and
+    SQLite (backup). SQLite vectors are always written so the keyword+cosine
+    fallback path works even when Neo4j is down.
+    """
     pairs = await embed_items(items)
+    if not pairs:
+        return
+
     for item_id, vector in pairs:
+        # always persist to SQLite as backup
+        ki = await session.get(KnowledgeItem, item_id)
+        if ki:
+            ki.embedding = vector
+
+        # push to Neo4j when available
         neo4j_graph.upsert_item_embedding(item_id, vector)
+
+    await session.commit()
+
+
+async def _build_artifact_summary(
+    session: AsyncSession,
+    workspace_id: str,
+    artifact: Dict[str, Any],
+    content: str,
+) -> None:
+    """Generate and persist a condensed LLM summary for the artifact (summary index)."""
+    from app.services.llm_extraction import _summarise_text
+    existing = (await session.execute(
+        select(ArtifactSummary).where(ArtifactSummary.artifact_id == artifact["id"])
+    )).scalar_one_or_none()
+
+    summary_text = await _summarise_text(content)
+    if not summary_text:
+        return
+
+    summary_vec = await embed(summary_text)
+    created_at  = datetime.utcnow().isoformat()
+
+    if existing:
+        existing.summary   = summary_text
+        existing.embedding = summary_vec
+    else:
+        session.add(ArtifactSummary(
+            workspace_id=workspace_id,
+            artifact_id=artifact["id"],
+            summary=summary_text,
+            embedding=summary_vec,
+            created_at=created_at,
+        ))
+    await session.commit()
+
+    # push to Neo4j summary index
+    if summary_vec:
+        neo4j_graph.upsert_artifact_summary(artifact["id"], summary_text, summary_vec)
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +711,8 @@ async def ingest_transcript(
 
     await session.commit()
     neo4j_graph.upsert_artifact_graph(artifact_dict, items, relationships)
-    await _embed_and_store(items)
+    await _embed_and_store(items, session)
+    await _build_artifact_summary(session, current_user.workspace_id, artifact_dict, request.content)
 
     return {
         "artifact": artifact_dict,
@@ -574,6 +731,7 @@ async def ingest_transcript(
 class GraphRagRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=8, ge=1, le=20)
+    history: List[Dict[str, str]] = []   # [{"role": "user"|"assistant", "content": "..."}]
 
 
 @app.post("/knowledge/graphrag/query")
@@ -582,23 +740,61 @@ async def graphrag_query_endpoint(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Dict[str, Any]:
-    # Load SQLite items as keyword-fallback context
+    ws = current_user.workspace_id
+    t0 = datetime.utcnow()
+
     all_items = (
         await session.execute(
             select(KnowledgeItem).where(
-                KnowledgeItem.workspace_id == current_user.workspace_id,
+                KnowledgeItem.workspace_id == ws,
                 KnowledgeItem.review_status != "rejected",
             )
         )
     ).scalars().all()
-    fallback = [_item_dict(i) for i in all_items]
+
+    fallback = [{**_item_dict(i), "embedding": i.embedding} for i in all_items]
+
+    cross_links_rows = (
+        await session.execute(select(CrossLink).where(CrossLink.workspace_id == ws))
+    ).scalars().all()
+    cross_links = [{"item_id_a": cl.item_id_a, "item_id_b": cl.item_id_b} for cl in cross_links_rows]
+
+    # load artifact summaries for the summary index fallback
+    summary_rows = (
+        await session.execute(select(ArtifactSummary).where(ArtifactSummary.workspace_id == ws))
+    ).scalars().all()
+    artifact_summaries = [
+        {"artifact_id": s.artifact_id, "title": "", "summary": s.summary, "embedding": s.embedding}
+        for s in summary_rows
+    ]
 
     result = await graphrag_query(
         question=request.question,
         neo4j_store=neo4j_graph,
         fallback_items=fallback,
+        cross_links=cross_links,
+        artifact_summaries=artifact_summaries,
+        history=request.history or None,
         top_k=request.top_k,
     )
+
+    # persist query log
+    latency_ms = int((datetime.utcnow() - t0).total_seconds() * 1000)
+    session.add(QueryLog(
+        workspace_id=ws,
+        question=request.question,
+        sub_queries=result.get("sub_queries", []),
+        hyde_doc=result.get("hyde_doc"),
+        route=result.get("route"),
+        retrieval_mode=result.get("retrieval_mode"),
+        context_node_ids=[n.get("id") for n in result.get("context_nodes", [])],
+        citations=result.get("citations", []),
+        answer_snippet=result.get("answer", "")[:400],
+        latency_ms=result.get("latency_ms", latency_ms),
+        created_at=t0.isoformat(),
+    ))
+    await session.commit()
+
     return result
 
 

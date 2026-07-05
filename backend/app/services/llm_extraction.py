@@ -60,3 +60,24 @@ def _fallback(text: str) -> Dict[str, Any]:
         "summary": sentences[0] if sentences else "",
         "llm_error": "no API key – regex fallback used",
     }
+
+
+async def _summarise_text(text: str) -> str:
+    """Return a 2-3 sentence condensed summary for the summary index."""
+    if not OPENAI_API_KEY:
+        # naive fallback: first 300 chars
+        return text.strip()[:300]
+    try:
+        from openai import AsyncOpenAI
+        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": "Summarise the following document in 2-3 sentences."},
+                {"role": "user", "content": text[:8000]},
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+        return r.choices[0].message.content.strip()
+    except Exception:
+        return text.strip()[:300]

@@ -112,65 +112,11 @@ main {
   font-size: 0.75rem;
 }
 
-.citation-tooltip {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  background: #333;
-  color: #fff;
-  padding: 0.5rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  white-space: nowrap;
-  z-index: 10;
-  margin-bottom: 0.25rem;
-}
-
-.citation-tooltip a {
-  color: #64b5f6;
-  text-decoration: underline;
-}
-
 .typing-indicator {
   padding: 0.75rem;
   color: #666;
   font-style: italic;
   font-size: 0.875rem;
-}
-
-.attachments {
-  padding: 0.5rem 1rem;
-  border-top: 1px solid #e0e0e0;
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
-.attachment-tag {
-  background: #e3f2fd;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.875rem;
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.attachment-tag button {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 1rem;
-  color: #666;
-}
-
-.input-area button.recording {
-  background: #dc3545;
-  color: #fff;
-}
-
-.citation {
-  position: relative;
 }
 
 .input-area {
@@ -280,6 +226,8 @@ button.warning:hover:not(:disabled) {
 
 input[type="text"],
 input[type="number"],
+input[type="password"],
+input:not([type]),
 select,
 textarea {
   padding: 0.75rem;
@@ -780,11 +728,6 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
-  .graph-header,
-  .detail-meta-grid div {
-    align-items: flex-start;
-  }
-
   .graph-layout,
   .detail-grid,
   .detail-meta-grid,
@@ -801,7 +744,6 @@ textarea:focus {
   }
 }
 
-/* Auth */
 .auth-shell {
   display: grid;
   place-items: center;
@@ -830,7 +772,6 @@ textarea:focus {
   gap: 0.75rem;
 }
 
-/* Review */
 .review-list {
   display: flex;
   flex-direction: column;
@@ -861,7 +802,6 @@ textarea:focus {
   display: inline-block;
 }
 
-/* Search page */
 .search-controls {
   background: #fff;
   border: 1px solid #dfe7e5;
@@ -878,12 +818,6 @@ textarea:focus {
   min-width: 200px;
 }
 
-.search-controls select,
-.search-controls input:not(.search-box input) {
-  min-width: 140px;
-}
-
-/* Transcript summary */
 .summary-box {
   background: #f0f7ff;
   border: 1px solid #b8d4f5;
@@ -892,9 +826,4 @@ textarea:focus {
   font-size: 0.9rem;
   line-height: 1.55;
   padding: 0.85rem 1rem;
-}
-
-/* action-item pill color */
-.type-pill:has(svg ~ *) {
-  /* handled generically — action-item uses same pill style */
 }

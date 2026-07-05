@@ -1,49 +1,96 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
+logger = logging.getLogger(__name__)
+
 try:
     from neo4j import GraphDatabase
+    from neo4j.exceptions import ServiceUnavailable, AuthError
 except ImportError:
-    GraphDatabase = None
+    GraphDatabase = None  # type: ignore
+    ServiceUnavailable = Exception  # type: ignore
+    AuthError = Exception  # type: ignore
 
-
-EMBEDDING_DIM = 1536  # text-embedding-3-small dimension
+EMBEDDING_DIM = 1536  # text-embedding-3-small
 
 
 class Neo4jGraphStore:
+    """
+    Primary graph + vector store backed by Neo4j.
+
+    Connection is attempted eagerly on init. If Neo4j is unreachable the
+    instance stays in a degraded state (`enabled=False`) and every method
+    returns an empty result so callers can fall through to the SQLite backup.
+    All failures are logged at WARNING level so they are visible in the server
+    log without crashing the application.
+    """
+
     def __init__(
         self,
         uri: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
         database: Optional[str] = None,
-    ):
+    ) -> None:
         self.uri = uri or os.getenv("NEO4J_URI")
         self.username = username or os.getenv("NEO4J_USERNAME", "neo4j")
         self.password = password or os.getenv("NEO4J_PASSWORD")
         self.database = database or os.getenv("NEO4J_DATABASE", "neo4j")
         self.driver = None
+        self._live = False
 
-        if GraphDatabase and self.uri and self.password:
-            self.driver = GraphDatabase.driver(self.uri, auth=(self.username, self.password))
+        if not GraphDatabase:
+            logger.warning("neo4j driver package not installed — graph store disabled")
+            return
+        if not self.uri or not self.password:
+            logger.warning(
+                "NEO4J_URI / NEO4J_PASSWORD not set — graph store disabled. "
+                "Set these env vars to enable GraphRAG."
+            )
+            return
+
+        try:
+            self.driver = GraphDatabase.driver(
+                self.uri, auth=(self.username, self.password)
+            )
+            self.driver.verify_connectivity()
+            self._live = True
+            logger.info("Neo4j connected: %s (db=%s)", self.uri, self.database)
+        except (ServiceUnavailable, AuthError, Exception) as exc:
+            logger.warning("Neo4j connection failed (%s) — falling back to SQLite vectors", exc)
+            if self.driver:
+                try:
+                    self.driver.close()
+                except Exception:
+                    pass
+            self.driver = None
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
 
     @property
     def enabled(self) -> bool:
-        return self.driver is not None
+        return self._live
 
     def close(self) -> None:
         if self.driver:
             self.driver.close()
 
     def verify(self) -> bool:
+        """Re-check live connectivity (used by /health)."""
         if not self.driver:
             return False
         try:
             self.driver.verify_connectivity()
+            self._live = True
             return True
-        except Exception:
+        except Exception as exc:
+            logger.warning("Neo4j connectivity check failed: %s", exc)
+            self._live = False
             return False
 
     # ------------------------------------------------------------------
@@ -51,21 +98,39 @@ class Neo4jGraphStore:
     # ------------------------------------------------------------------
 
     def ensure_vector_index(self) -> None:
-        """Create the Neo4j vector index for KnowledgeItem embeddings if absent."""
         if not self.driver:
             return
-        with self.driver.session(database=self.database) as session:
-            session.run("""
-                CREATE VECTOR INDEX knowledge_item_embeddings IF NOT EXISTS
-                FOR (n:KnowledgeItem)
-                ON n.embedding
-                OPTIONS {
-                    indexConfig: {
-                        `vector.dimensions`: $dim,
-                        `vector.similarity_function`: 'cosine'
+        try:
+            with self.driver.session(database=self.database) as session:
+                session.run(
+                    """
+                    CREATE VECTOR INDEX knowledge_item_embeddings IF NOT EXISTS
+                    FOR (n:KnowledgeItem) ON n.embedding
+                    OPTIONS {
+                        indexConfig: {
+                            `vector.dimensions`: $dim,
+                            `vector.similarity_function`: 'cosine'
+                        }
                     }
-                }
-            """, dim=EMBEDDING_DIM)
+                    """,
+                    dim=EMBEDDING_DIM,
+                )
+                session.run(
+                    """
+                    CREATE VECTOR INDEX artifact_summary_embeddings IF NOT EXISTS
+                    FOR (n:Artifact) ON n.summary_embedding
+                    OPTIONS {
+                        indexConfig: {
+                            `vector.dimensions`: $dim,
+                            `vector.similarity_function`: 'cosine'
+                        }
+                    }
+                    """,
+                    dim=EMBEDDING_DIM,
+                )
+            logger.info("Neo4j vector indexes ensured (dim=%d)", EMBEDDING_DIM)
+        except Exception as exc:
+            logger.warning("Could not create vector index: %s", exc)
 
     # ------------------------------------------------------------------
     # Ingest
@@ -79,87 +144,152 @@ class Neo4jGraphStore:
     ) -> None:
         if not self.driver:
             return
-        with self.driver.session(database=self.database) as session:
-            session.execute_write(self._upsert_artifact_graph, artifact, items, relationships)
+        try:
+            with self.driver.session(database=self.database) as session:
+                session.execute_write(
+                    self._upsert_artifact_graph, artifact, items, relationships
+                )
+        except Exception as exc:
+            logger.warning("Neo4j upsert_artifact_graph failed: %s", exc)
 
     def upsert_item_embedding(self, item_id: str, embedding: List[float]) -> None:
-        """Store a pre-computed embedding vector on a KnowledgeItem node."""
         if not self.driver:
             return
-        with self.driver.session(database=self.database) as session:
-            session.run(
-                """
-                MATCH (n:KnowledgeItem {id: $id})
-                CALL db.create.setNodeVectorProperty(n, 'embedding', $embedding)
-                """,
-                id=item_id,
-                embedding=embedding,
-            )
+        try:
+            with self.driver.session(database=self.database) as session:
+                session.run(
+                    """
+                    MATCH (n:KnowledgeItem {id: $id})
+                    CALL db.create.setNodeVectorProperty(n, 'embedding', $embedding)
+                    """,
+                    id=item_id,
+                    embedding=embedding,
+                )
+        except Exception as exc:
+            logger.warning("Neo4j upsert_item_embedding failed for %s: %s", item_id, exc)
+
+    def upsert_artifact_summary(self, artifact_id: str, summary: str, embedding: List[float]) -> None:
+        """Store condensed summary text + embedding on the Artifact node (summary index)."""
+        if not self.driver:
+            return
+        try:
+            with self.driver.session(database=self.database) as session:
+                session.run(
+                    """
+                    MATCH (a:Artifact {id: $id})
+                    SET a.summary = $summary
+                    CALL db.create.setNodeVectorProperty(a, 'summary_embedding', $embedding)
+                    """,
+                    id=artifact_id,
+                    summary=summary,
+                    embedding=embedding,
+                )
+        except Exception as exc:
+            logger.warning("Neo4j upsert_artifact_summary failed for %s: %s", artifact_id, exc)
+
+    def summary_vector_search(
+        self, query_embedding: List[float], top_k: int = 4
+    ) -> List[Dict[str, Any]]:
+        """Retrieve top-k artifact summaries by vector similarity."""
+        if not self.driver:
+            return []
+        try:
+            with self.driver.session(database=self.database) as session:
+                result = session.run(
+                    """
+                    CALL db.index.vector.queryNodes(
+                        'artifact_summary_embeddings', $top_k, $embedding
+                    )
+                    YIELD node, score
+                    RETURN node.id      AS artifact_id,
+                           node.title   AS title,
+                           node.summary AS summary,
+                           score
+                    """,
+                    top_k=top_k,
+                    embedding=query_embedding,
+                )
+                return [dict(r) for r in result]
+        except Exception as exc:
+            logger.warning("Neo4j summary_vector_search failed: %s", exc)
+            return []
 
     # ------------------------------------------------------------------
     # GraphRAG retrieval
     # ------------------------------------------------------------------
 
-    def vector_search(self, query_embedding: List[float], top_k: int = 8) -> List[Dict[str, Any]]:
-        """
-        Return the top_k KnowledgeItem nodes most similar to the query embedding.
-        Each result: {id, title, kind, score}
-        """
+    def vector_search(
+        self, query_embedding: List[float], top_k: int = 8
+    ) -> List[Dict[str, Any]]:
+        """Cosine-similarity ANN search over the vector index."""
         if not self.driver:
             return []
-        with self.driver.session(database=self.database) as session:
-            result = session.run(
-                """
-                CALL db.index.vector.queryNodes('knowledge_item_embeddings', $top_k, $embedding)
-                YIELD node, score
-                RETURN node.id AS id,
-                       node.title AS title,
-                       node.kind AS kind,
-                       node.artifact_id AS artifact_id,
-                       node.tags AS tags,
-                       score
-                """,
-                top_k=top_k,
-                embedding=query_embedding,
-            )
-            return [dict(r) for r in result]
+        try:
+            with self.driver.session(database=self.database) as session:
+                result = session.run(
+                    """
+                    CALL db.index.vector.queryNodes(
+                        'knowledge_item_embeddings', $top_k, $embedding
+                    )
+                    YIELD node, score
+                    RETURN node.id          AS id,
+                           node.title       AS title,
+                           node.kind        AS kind,
+                           node.artifact_id AS artifact_id,
+                           node.tags        AS tags,
+                           score
+                    """,
+                    top_k=top_k,
+                    embedding=query_embedding,
+                )
+                return [dict(r) for r in result]
+        except Exception as exc:
+            logger.warning("Neo4j vector_search failed: %s", exc)
+            return []
 
-    def graph_expand(self, item_ids: List[str], hops: int = 2) -> List[Dict[str, Any]]:
+    def graph_expand(
+        self, item_ids: List[str], hops: int = 1
+    ) -> List[Dict[str, Any]]:
         """
-        Starting from seed item_ids, walk up to `hops` relationship hops
-        and return neighbouring nodes with their relationship context.
+        Walk up to `hops` relationship hops from seed nodes.
+        Tries APOC first; falls back to plain Cypher on failure.
         """
         if not self.driver or not item_ids:
             return []
+        try:
+            return self._graph_expand_apoc(item_ids, hops)
+        except Exception:
+            try:
+                return self._graph_expand_plain(item_ids)
+            except Exception as exc:
+                logger.warning("Neo4j graph_expand failed: %s", exc)
+                return []
+
+    def _graph_expand_apoc(
+        self, item_ids: List[str], hops: int
+    ) -> List[Dict[str, Any]]:
         with self.driver.session(database=self.database) as session:
             result = session.run(
                 """
-                MATCH (seed:KnowledgeItem)
-                WHERE seed.id IN $ids
+                MATCH (seed:KnowledgeItem) WHERE seed.id IN $ids
                 CALL apoc.path.subgraphNodes(seed, {
                     maxLevel: $hops,
                     labelFilter: 'KnowledgeItem|Artifact'
                 })
                 YIELD node
                 RETURN DISTINCT
-                    node.id        AS id,
-                    node.title     AS title,
-                    node.kind      AS kind,
+                    node.id          AS id,
+                    node.title       AS title,
+                    node.kind        AS kind,
                     node.artifact_id AS artifact_id,
-                    labels(node)   AS labels
+                    labels(node)     AS labels
                 """,
                 ids=item_ids,
                 hops=hops,
             )
             return [dict(r) for r in result]
 
-    def graph_expand_fallback(self, item_ids: List[str]) -> List[Dict[str, Any]]:
-        """
-        APOC-free neighbour expansion — used when APOC is not installed.
-        Walks one hop via any relationship from seed nodes.
-        """
-        if not self.driver or not item_ids:
-            return []
+    def _graph_expand_plain(self, item_ids: List[str]) -> List[Dict[str, Any]]:
         with self.driver.session(database=self.database) as session:
             result = session.run(
                 """
@@ -167,11 +297,11 @@ class Neo4jGraphStore:
                 WHERE seed.id IN $ids
                   AND (neighbour:KnowledgeItem OR neighbour:Artifact)
                 RETURN DISTINCT
-                    neighbour.id        AS id,
-                    neighbour.title     AS title,
-                    neighbour.kind      AS kind,
+                    neighbour.id          AS id,
+                    neighbour.title       AS title,
+                    neighbour.kind        AS kind,
                     neighbour.artifact_id AS artifact_id,
-                    labels(neighbour)   AS labels
+                    labels(neighbour)     AS labels
                 """,
                 ids=item_ids,
             )
@@ -185,28 +315,43 @@ class Neo4jGraphStore:
     ) -> List[Dict[str, Any]]:
         """
         Full GraphRAG retrieval:
-          1. Vector similarity search → seed nodes
-          2. Graph expansion from seeds → neighbourhood context
-          3. Deduplicate and return unified context list
+          1. Vector ANN → seed nodes (with cosine scores)
+          2. Graph walk from seeds → neighbourhood nodes
+          3. Rerank: seeds keep their cosine score; neighbours get a
+             proximity-discounted score (seed_score * 0.7) so the
+             final list is ordered by relevance, not arbitrary graph order
         """
         seeds = self.vector_search(query_embedding, top_k=top_k)
-        seed_ids = [s["id"] for s in seeds]
+        if not seeds:
+            return []
 
-        try:
-            neighbours = self.graph_expand(seed_ids, hops=expand_hops)
-        except Exception:
-            neighbours = self.graph_expand_fallback(seed_ids)
+        seed_score_map = {s["id"]: s.get("score", 0.0) for s in seeds}
+        seed_ids = list(seed_score_map)
+
+        neighbours = self.graph_expand(seed_ids, hops=expand_hops)
 
         seen: set[str] = set()
         combined: List[Dict[str, Any]] = []
+
         for node in seeds:
             if node["id"] not in seen:
                 seen.add(node["id"])
                 combined.append({**node, "retrieved_by": "vector"})
+
         for node in neighbours:
-            if node.get("id") and node["id"] not in seen:
-                seen.add(node["id"])
-                combined.append({**node, "retrieved_by": "graph", "score": 0.0})
+            nid = node.get("id")
+            if nid and nid not in seen:
+                seen.add(nid)
+                # find the highest-scoring seed that reached this neighbour
+                proximity_score = max(seed_score_map.values(), default=0.0) * 0.7
+                combined.append({
+                    **node,
+                    "retrieved_by": "graph",
+                    "score": proximity_score,
+                })
+
+        # sort descending by score
+        combined.sort(key=lambda n: n.get("score") or 0.0, reverse=True)
         return combined
 
     # ------------------------------------------------------------------
@@ -216,33 +361,40 @@ class Neo4jGraphStore:
     def visualization_data(self) -> Dict[str, Any]:
         if not self.driver:
             return {"nodes": [], "edges": [], "layout": "force-directed"}
-
-        query = """
-        MATCH (n)
-        WHERE n:Artifact OR n:KnowledgeItem
-        OPTIONAL MATCH (n)-[r]->(m)
-        WHERE m:Artifact OR m:KnowledgeItem
-        RETURN
-          collect(DISTINCT {
-            id: n.id,
-            label: coalesce(n.title, n.id),
-            type: coalesce(n.kind, CASE WHEN n:Artifact THEN 'artifact' ELSE 'knowledge-item' END)
-          }) AS nodes,
-          collect(DISTINCT {
-            source: n.id,
-            target: m.id,
-            label: type(r)
-          }) AS edges
-        """
-        with self.driver.session(database=self.database) as session:
-            record = session.run(query).single()
-            if not record:
-                return {"nodes": [], "edges": [], "layout": "force-directed"}
-            edges = [e for e in record["edges"] if e.get("source") and e.get("target")]
-            return {"nodes": record["nodes"], "edges": edges, "layout": "force-directed"}
+        try:
+            query = """
+            MATCH (n) WHERE n:Artifact OR n:KnowledgeItem
+            OPTIONAL MATCH (n)-[r]->(m) WHERE m:Artifact OR m:KnowledgeItem
+            RETURN
+              collect(DISTINCT {
+                id: n.id,
+                label: coalesce(n.title, n.id),
+                type: coalesce(n.kind, CASE WHEN n:Artifact THEN 'artifact'
+                                            ELSE 'knowledge-item' END)
+              }) AS nodes,
+              collect(DISTINCT {
+                source: n.id, target: m.id, label: type(r)
+              }) AS edges
+            """
+            with self.driver.session(database=self.database) as session:
+                record = session.run(query).single()
+                if not record:
+                    return {"nodes": [], "edges": [], "layout": "force-directed"}
+                edges = [
+                    e for e in record["edges"]
+                    if e.get("source") and e.get("target")
+                ]
+                return {
+                    "nodes": record["nodes"],
+                    "edges": edges,
+                    "layout": "force-directed",
+                }
+        except Exception as exc:
+            logger.warning("Neo4j visualization_data failed: %s", exc)
+            return {"nodes": [], "edges": [], "layout": "force-directed"}
 
     # ------------------------------------------------------------------
-    # Internal write
+    # Internal write transaction
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -255,9 +407,9 @@ class Neo4jGraphStore:
         tx.run(
             """
             MERGE (a:Artifact {id: $id})
-            SET a.title = $title, a.source = $source, a.source_type = $source_type,
-                a.author = $author, a.created_at = $created_at,
-                a.tags = $tags, a.kind = 'artifact'
+            SET a.title = $title, a.source = $source,
+                a.source_type = $source_type, a.author = $author,
+                a.created_at = $created_at, a.tags = $tags, a.kind = 'artifact'
             """,
             id=artifact["id"],
             title=artifact["title"],
@@ -267,7 +419,6 @@ class Neo4jGraphStore:
             created_at=artifact.get("created_at"),
             tags=artifact.get("tags", []),
         )
-
         for item in items:
             tx.run(
                 """
@@ -285,12 +436,10 @@ class Neo4jGraphStore:
                 confidence=item.get("details", {}).get("confidence"),
                 artifact_id=item.get("artifact_id"),
             )
-
         for rel in relationships:
             tx.run(
                 """
-                MATCH (s {id: $from_id})
-                MATCH (t {id: $to_id})
+                MATCH (s {id: $from_id}) MATCH (t {id: $to_id})
                 MERGE (s)-[r:CONTAINS]->(t)
                 SET r.kind = $kind
                 """,
