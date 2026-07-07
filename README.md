@@ -1,8 +1,8 @@
 # Knowledge Hubs
 
-Knowledge Hubs is a local-first product for turning team knowledge into reusable operational memory. Paste meeting notes, project writeups, retrospectives, process docs, or decision logs, and the app extracts structured knowledge such as decisions, risks, checklists, lessons, how-to patterns, and best practices.
+Knowledge Hubs is a local-first product for turning team knowledge into reusable operational memory. Paste meeting notes, project writeups, retrospectives, process docs, or decision logs, and the app extracts structured knowledge — decisions, risks, checklists, lessons, how-to patterns, and best practices — and stores it in a searchable, relationship-aware graph.
 
-The product includes a FastAPI backend, a Neo4j-backed knowledge graph, and a Next.js workspace for ingesting and browsing extracted knowledge.
+The product includes a FastAPI backend, a Neo4j-backed knowledge graph, and an Angular workspace for ingesting, browsing, editing, and querying extracted knowledge.
 
 ## Product Positioning
 
@@ -14,35 +14,59 @@ Use it for:
 - turning project notes into checklists and how-to guidance
 - identifying risks, success factors, and best practices from team documents
 - building a persistent knowledge graph with rich relationship traversal
+- asking natural-language questions over your entire knowledge base
 
 ## Core Capabilities
 
-- **Artifact ingestion**: submit manual notes, documents, summaries, or process text.
-- **Knowledge extraction**: identify decisions, risks, best practices, lessons, checklists, and how-to items.
-- **Graph persistence**: store artifacts, extracted items, relationships, and playbooks in Neo4j.
-- **Knowledge browser**: search and filter extracted knowledge in the Next.js UI.
-- **Knowledge item details**: inspect extracted metadata, source artifacts, tags, and relationships.
-- **Graph-ready API**: expose relationship data for knowledge graph visualizations.
-- **Frontend graph visualization**: browse artifact-to-knowledge relationships from the hub.
+- **Artifact ingestion**: submit text, upload files (PDF, TXT, MD), fetch URLs, or extract decisions from meeting transcripts, emails, and Slack threads using a local LLM.
+- **Knowledge extraction**: identify decisions, risks, best practices, lessons, checklists, and how-to items automatically.
+- **Full CRUD**: create, read, update, and delete both artifacts and individual knowledge items from the UI and API.
+- **Graph persistence**: store artifacts, extracted items, relationships, and playbooks in Neo4j with full relationship traversal.
+- **Interactive graph visualization**: pan, zoom (mouse wheel + buttons), and drag nodes in the knowledge graph view.
+- **Knowledge browser**: filter and search extracted knowledge by type, tag, and free text.
+- **Knowledge item details**: inspect extracted metadata, source artifacts, tags, relationships, and cross-source links.
+- **Review workflow**: accept or reject pending knowledge items before they enter the active knowledge base.
+- **Cross-source linking**: automatically detect and surface related items across different artifacts using keyword similarity.
 - **Playbook support**: create curated playbooks from structured steps.
-- **OKF import/export**: ingest and export knowledge using a Google-style Open Knowledge Format payload.
-- **RAG queries**: ask natural-language questions over the workspace and receive grounded answers from the retrieved knowledge.
+- **OKF import/export**: ingest and export knowledge using an Open Knowledge Format payload.
+- **GraphRAG queries**: ask natural-language questions over the workspace and receive grounded answers with citations and context nodes.
 
 ## Product Architecture
 
 ```text
 Knowledge Hubs
-+-- backend/                 FastAPI service and extraction pipeline
++-- backend/                  FastAPI service and extraction pipeline
 |   +-- app/
-|   |   +-- main.py           API routes and ingestion orchestration
-|   |   +-- store.py          Neo4j persistence layer
-|   |   +-- services/         Extraction, normalization, graph, and curation services
-|   +-- data/                 Fallback local store (SQLite, optional)
-+-- frontend/                Angular product UI
-|   +-- src/
-|       +-- app/
-|           +-- pages/        Route components (knowledge, login, review, search, graphrag)
-|           +-- services/     AuthService and auth guard
+|   |   +-- main.py            API routes, CRUD endpoints, ingestion orchestration
+|   |   +-- store.py           Neo4j persistence layer
+|   |   +-- db.py              SQLite models (SQLAlchemy async)
+|   |   +-- auth.py            JWT authentication
+|   |   +-- services/
+|   |       +-- embeddings.py          Local-first embedding provider
+|   |       +-- llm_client.py          Local-first LLM provider (Ollama / OpenAI)
+|   |       +-- llm_extraction.py      LLM-backed transcript extraction
+|   |       +-- graphrag.py            GraphRAG pipeline (retrieval + generation)
+|   |       +-- knowledge_extraction.py  Rule-based extraction
+|   |       +-- cross_source_linker.py   Cross-artifact similarity linking
+|   |       +-- graph_builder.py         Graph visualization builder
+|   |       +-- curation_layer.py        Playbook curation
+|   |       +-- neo4j_graph.py           Neo4j graph + vector store
+|   |       +-- ingestion_normalization.py
+|   |       +-- item_schema.py
+|   |       +-- okf.py
+|   +-- data/                 SQLite fallback store
++-- frontend/                 Angular 17 product UI
+|   +-- src/app/
+|       +-- pages/
+|       |   +-- knowledge/         Hub — ingest, browse, graph, artifact CRUD
+|       |   +-- knowledge-detail/  Item detail — edit, delete, relationships
+|       |   +-- search/            Full-text + filter search
+|       |   +-- review/            Pending item review queue
+|       |   +-- graphrag/          GraphRAG chat interface
+|       |   +-- login/             Authentication
+|       +-- services/
+|           +-- auth.service.ts    JWT auth + API base
+|           +-- auth.guard.ts      Route guard
 +-- docker-compose.yml        Full product runtime
 +-- .env.example              Environment configuration
 ```
@@ -50,30 +74,47 @@ Knowledge Hubs
 ## Tech Stack
 
 - **Frontend**: Angular 17, TypeScript
-- **Backend**: FastAPI, Pydantic, Uvicorn, Neo4j (primary graph store)
-- **Fallback storage (optional)**: SQLite for local-only or offline mode
-- **LLM integration (optional)**: OpenAI for transcript ingestion and extraction
-- **Storage**: Neo4j graph (default) — SQLite is supported as a lightweight fallback
+- **Backend**: FastAPI, Pydantic, Uvicorn, SQLAlchemy (async SQLite)
+- **Graph store**: Neo4j (primary) — SQLite cosine search fallback when Neo4j is unavailable
+- **Embeddings (default)**: sentence-transformers `all-MiniLM-L6-v2` — runs fully offline, no API key required, dim=384
+- **LLM (default)**: Ollama (`llama3.1:8b` or any local model) — extraction, summarisation, GraphRAG generation and reranking
+- **Cloud upgrade (optional)**: set `EMBEDDING_PROVIDER=openai` and/or `LLM_PROVIDER=openai` with an `OPENAI_API_KEY` to swap in OpenAI models independently
 - **Runtime**: Docker Compose or local Node/Python processes
-
 
 ## Run Locally
 
 ### 1. Configure Environment
 
-Copy the example environment file if you want to customize the frontend API URL:
+Copy the example environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Default API target:
+The defaults work fully offline — no API keys needed. To upgrade to OpenAI:
 
 ```bash
-NEXT_PUBLIC_API_BASE=http://localhost:8000
+# .env
+EMBEDDING_PROVIDER=openai
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+EMBEDDING_DIM=1536   # text-embedding-3-small
 ```
 
-### 2. Start the Backend
+To use a different local Ollama model:
+
+```bash
+OLLAMA_MODEL=mistral
+```
+
+### 2. Start Ollama (local LLM)
+
+```bash
+# Install from https://ollama.com, then:
+ollama pull llama3.1:8b
+```
+
+### 3. Start the Backend
 
 ```bash
 cd backend
@@ -89,7 +130,7 @@ Backend health check:
 curl http://localhost:8000/health
 ```
 
-### 3. Start the Frontend
+### 4. Start the Frontend
 
 ```bash
 cd frontend
@@ -113,72 +154,109 @@ The frontend runs on `http://localhost:3000` and the backend runs on `http://loc
 
 ## API Surface
 
-### `GET /health`
+### Auth
 
-Returns backend health status.
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/auth/register` | Register a new user and workspace |
+| `POST` | `/auth/token` | Login and receive a JWT |
 
-### `GET /knowledge`
+### Health
 
-Returns the full local knowledge store:
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Backend and Neo4j status |
+| `GET` | `/health/consistency` | SQLite vs Neo4j drift report |
 
-- `artifacts`
-- `knowledge_items`
-- `relationships`
-- `playbooks`
+### Artifacts
 
-### `POST /knowledge/artifacts`
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/knowledge` | Full workspace snapshot (artifacts, items, relationships, playbooks) |
+| `POST` | `/knowledge/artifacts` | Ingest text artifact and extract knowledge |
+| `POST` | `/knowledge/artifacts/upload` | Upload a file (PDF, TXT, MD) and extract knowledge |
+| `POST` | `/knowledge/artifacts/url` | Fetch a URL and extract knowledge |
+| `POST` | `/knowledge/artifacts/transcript` | Extract decisions from a transcript, email, or Slack thread using LLM |
+| `PUT` | `/knowledge/artifacts/{id}` | Update artifact title and/or tags (re-extracts if content changes) |
+| `DELETE` | `/knowledge/artifacts/{id}` | Delete artifact and all its extracted items and relationships |
 
-Ingests a source artifact and extracts knowledge items.
+### Knowledge Items
 
-Example request:
+| Method | Path | Description |
+|--------|------|-------------|
+| `PUT` | `/knowledge/items/{id}` | Update item title, tags, or details |
+| `DELETE` | `/knowledge/items/{id}` | Delete a single knowledge item and its relationships |
 
-```json
-{
-  "title": "Q2 Launch Retro",
-  "content": "We decided to freeze scope two weeks before launch...",
-  "source": "manual",
-  "author": "Product Team",
-  "tags": ["launch", "retro"]
-}
-```
+### Review
 
-### `POST /knowledge/playbooks`
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/knowledge/review` | List items pending review |
+| `PATCH` | `/knowledge/review/{id}` | Accept or reject a pending item |
 
-Creates a curated playbook from structured steps.
+### Search & Links
 
-### `GET /knowledge/graph`
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/knowledge/search` | Full-text search with type, source, and tag filters |
+| `POST` | `/knowledge/link` | Run cross-source linking across all workspace items |
+| `GET` | `/knowledge/links` | List all cross-source links |
 
-Returns graph visualization data built from artifacts, knowledge items, and relationships.
+### Graph & Playbooks
 
-### `POST /knowledge/okf/import`
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/knowledge/graph` | Graph visualization data (nodes + edges) |
+| `POST` | `/knowledge/playbooks` | Create a curated playbook |
 
-Imports an OKF-style JSON payload with nodes and edges into the workspace knowledge store.
+### OKF & GraphRAG
 
-### `GET /knowledge/okf/export`
-
-Exports the current workspace into an OKF-style JSON payload for downstream tooling.
-
-### `POST /knowledge/graphrag/query`
-
-Runs the Retrieval-Augmented Generation pipeline over the workspace knowledge and returns a grounded answer with citations and context nodes.
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/knowledge/okf/import` | Import an OKF-style JSON payload |
+| `GET` | `/knowledge/okf/export` | Export workspace as OKF payload |
+| `POST` | `/knowledge/graphrag/query` | Run GraphRAG query and return grounded answer with citations |
 
 ## Data Model
 
-Knowledge Hubs stores four primary collections:
+Knowledge Hubs stores five primary collections:
 
-- **Artifacts**: raw source documents and metadata.
-- **Knowledge items**: extracted decisions, risks, lessons, practices, checklists, and how-to items.
-- **Relationships**: links between artifacts and extracted knowledge items.
-- **Playbooks**: curated reusable workflows.
+- **Artifacts**: raw source documents with title, content, author, tags, and metadata.
+- **Knowledge items**: extracted decisions, risks, lessons, practices, checklists, and how-to items — each linked to a source artifact.
+- **Relationships**: typed edges between artifacts and knowledge items (`CONTAINS`, `RELATED_TO`).
+- **Playbooks**: curated reusable workflows built from structured steps.
+- **Cross-links**: similarity-scored links between knowledge items from different artifacts.
 
-The default persistence layer is Neo4j, which supports rich relationship traversal, graph queries, and optional vector indexing. For lightweight or offline use, the store can be swapped to SQLite behind the same persistence boundary.
+The default persistence layer is Neo4j, which supports rich relationship traversal, graph queries, and vector indexing for semantic search. SQLite is maintained in parallel as a fallback for cosine vector search and offline use.
+
+## Frontend Pages
+
+| Route | Description |
+|-------|-------------|
+| `/knowledge` | Main hub — ingest artifacts, browse extracted items, manage artifacts (edit/delete), interactive knowledge graph |
+| `/knowledge/:id` | Item detail — view extracted fields, source artifact, relationships, cross-links; edit title or delete item |
+| `/search` | Full-text and filtered search across items and artifacts with shareable URLs |
+| `/review` | Review queue for pending knowledge items — accept, reject, or edit before promoting |
+| `/graphrag` | GraphRAG chat — ask questions over the knowledge base, see context nodes and retrieval mode |
+| `/login` | Authentication |
+
+## Interactive Graph
+
+The knowledge graph on the hub page supports:
+
+- **Mouse wheel zoom** — zoom toward the cursor position
+- **Zoom buttons** — `+` / `−` / `⊙` reset, with a live percentage readout
+- **Pan** — click and drag the canvas background
+- **Node drag** — reposition individual nodes by dragging them
+- **Node selection** — click a node to inspect its relationships in the side panel
 
 ## Development Notes
 
-> **In progress**: the project is evolving toward a Neo4j-primary backend with LLM-assisted transcript ingestion and optional SQLite fallback for local-only deployments.
-
-- Backend CORS is configured for the local frontend on ports `3000` and `8000`.
-- Extracted IDs are deterministic hashes based on artifact content and extracted item titles.
-- The current extraction services are lightweight and deterministic; they are designed to be replaced or extended with richer NLP or LLM-backed extraction.
-- Docker runs Neo4j as the primary store; `backend/data` is mounted for SQLite fallback persistence across container rebuilds.
-- Set `STORAGE_BACKEND=sqlite` in your environment to switch to the SQLite fallback without code changes.
+- **Local-first by default**: embeddings use `sentence-transformers` (all-MiniLM-L6-v2, dim=384) and LLM calls go to Ollama. No external API key is required for any feature.
+- **Cloud as opt-in**: set `EMBEDDING_PROVIDER=openai` and/or `LLM_PROVIDER=openai` with `OPENAI_API_KEY` to upgrade individual layers independently.
+- **Embedding dimension**: the Neo4j vector index is created with `EMBEDDING_DIM` (default 384). If you switch to OpenAI embeddings, set `EMBEDDING_DIM=1536` and recreate the index.
+- **CORS**: backend allows `localhost:3000`, `localhost:4200`, and their `127.0.0.1` equivalents.
+- **Deterministic IDs**: artifact and item IDs are stable SHA-256 hashes of their content, so re-ingesting the same document is idempotent.
+- **Dual-store writes**: every embedding is written to both SQLite (always available) and Neo4j (when connected), so vector search degrades gracefully rather than failing.
+- **Docker**: Neo4j runs as the primary store; `backend/data` is mounted for SQLite persistence across container rebuilds.
+- **SQLite fallback**: set `STORAGE_BACKEND=sqlite` to bypass Neo4j entirely without code changes.

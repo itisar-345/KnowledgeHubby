@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+from app.services.item_schema import normalize_item_details
+from app.services import llm_client
 
 _SYSTEM_PROMPT = """You are a meeting analyst. Extract structured knowledge from the transcript.
 Return ONLY valid JSON with this exact shape:
@@ -24,29 +24,24 @@ Rules:
 
 
 async def extract_from_transcript(text: str) -> Dict[str, Any]:
-    if not OPENAI_API_KEY:
-        return _fallback(text)
-
-    try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        response = await client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": text[:12000]},  # ~3k tokens safety cap
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as exc:
-        # degrade gracefully – fall back to regex extraction
-        return {**_fallback(text), "llm_error": str(exc)}
+    content = await llm_client.chat(
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": text[:12000]},
+        ],
+        temperature=0,
+        json_mode=True,
+    )
+    if content:
+        try:
+            return _normalize_llm_result(json.loads(content))
+        except Exception as exc:
+            return {**_normalize_llm_result(_fallback(text)), "llm_error": str(exc)}
+    return _fallback(text)
 
 
 def _fallback(text: str) -> Dict[str, Any]:
-    """Regex fallback when no API key is set."""
+    """Regex fallback when no LLM is reachable."""
     import re
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if len(s.strip()) > 10]
     decisions = [{"what": s, "why": "", "who": ""} for s in sentences
@@ -58,26 +53,31 @@ def _fallback(text: str) -> Dict[str, Any]:
         "action_items": actions[:10],
         "risks": [],
         "summary": sentences[0] if sentences else "",
-        "llm_error": "no API key – regex fallback used",
+        "llm_error": "no LLM reachable – regex fallback used",
     }
+
+
+def _normalize_llm_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    result["decisions"] = [
+        normalize_item_details(d, "decision", "llm") for d in result.get("decisions") or []
+    ]
+    result["action_items"] = [
+        normalize_item_details(a, "action-item", "llm") for a in result.get("action_items") or []
+    ]
+    result["risks"] = [
+        normalize_item_details(r, "risk", "llm") for r in result.get("risks") or []
+    ]
+    return result
 
 
 async def _summarise_text(text: str) -> str:
     """Return a 2-3 sentence condensed summary for the summary index."""
-    if not OPENAI_API_KEY:
-        # naive fallback: first 300 chars
-        return text.strip()[:300]
-    try:
-        from openai import AsyncOpenAI
-        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[
-                {"role": "system", "content": "Summarise the following document in 2-3 sentences."},
-                {"role": "user", "content": text[:8000]},
-            ],
-            temperature=0,
-            max_tokens=120,
-        )
-        return r.choices[0].message.content.strip()
-    except Exception:
-        return text.strip()[:300]
+    content = await llm_client.chat(
+        messages=[
+            {"role": "system", "content": "Summarise the following document in 2-3 sentences."},
+            {"role": "user", "content": text[:8000]},
+        ],
+        temperature=0,
+        max_tokens=120,
+    )
+    return content if content else text.strip()[:300]

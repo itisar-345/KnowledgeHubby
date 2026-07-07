@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
@@ -40,13 +40,17 @@ from app.services.ingestion_normalization import IngestionNormalization
 from app.services.knowledge_extraction import KnowledgeExtraction
 from app.services.llm_extraction import extract_from_transcript
 from app.services.neo4j_graph import Neo4jGraphStore
+from app.services.item_schema import normalize_item_details
 from app.services.okf import export_okf_payload, normalize_okf_payload
 
 app = FastAPI(title="Knowledge Hubs")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:4200", "http://127.0.0.1:4200",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -124,6 +128,66 @@ async def health() -> Dict[str, Any]:
     }
 
 
+@app.get("/health/consistency")
+async def consistency_check(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    """Compare SQLite vs Neo4j node counts to surface dual-store drift."""
+    ws = current_user.workspace_id
+    sqlite_artifacts = (await session.execute(
+        select(Artifact).where(Artifact.workspace_id == ws)
+    )).scalars().all()
+    sqlite_items = (await session.execute(
+        select(KnowledgeItem).where(KnowledgeItem.workspace_id == ws)
+    )).scalars().all()
+
+    sqlite_artifact_ids = {a.id for a in sqlite_artifacts}
+    sqlite_item_ids = {i.id for i in sqlite_items}
+    sqlite_embedded = sum(1 for i in sqlite_items if i.embedding)
+
+    result: Dict[str, Any] = {
+        "sqlite": {
+            "artifacts": len(sqlite_artifact_ids),
+            "knowledge_items": len(sqlite_item_ids),
+            "items_with_embeddings": sqlite_embedded,
+        },
+        "neo4j": {"status": "disabled"},
+        "drift": [],
+    }
+
+    if neo4j_graph.enabled and neo4j_graph.verify():
+        try:
+            with neo4j_graph.driver.session(database=neo4j_graph.database) as s:
+                neo4j_artifact_ids = {
+                    r["id"] for r in s.run("MATCH (a:Artifact) RETURN a.id AS id")
+                }
+                neo4j_item_ids = {
+                    r["id"] for r in s.run("MATCH (n:KnowledgeItem) RETURN n.id AS id")
+                }
+            result["neo4j"] = {
+                "artifacts": len(neo4j_artifact_ids),
+                "knowledge_items": len(neo4j_item_ids),
+            }
+            only_sqlite_artifacts = sqlite_artifact_ids - neo4j_artifact_ids
+            only_sqlite_items = sqlite_item_ids - neo4j_item_ids
+            only_neo4j_artifacts = neo4j_artifact_ids - sqlite_artifact_ids
+            only_neo4j_items = neo4j_item_ids - sqlite_item_ids
+            if any([only_sqlite_artifacts, only_sqlite_items, only_neo4j_artifacts, only_neo4j_items]):
+                result["drift"] = [
+                    {"issue": "artifacts only in SQLite", "ids": list(only_sqlite_artifacts)},
+                    {"issue": "items only in SQLite", "ids": list(only_sqlite_items)},
+                    {"issue": "artifacts only in Neo4j", "ids": list(only_neo4j_artifacts)},
+                    {"issue": "items only in Neo4j", "ids": list(only_neo4j_items)},
+                ]
+                result["drift"] = [d for d in result["drift"] if d["ids"]]
+        except Exception as exc:
+            result["neo4j"] = {"status": "error", "detail": str(exc)}
+
+    result["in_sync"] = len(result["drift"]) == 0
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -145,7 +209,7 @@ def _build_items(artifact_id: str, content: str, author: str, tags: List[str], c
     items: List[Dict[str, Any]] = []
     for label in ["decisions", "how_tos", "lessons", "risks"]:
         for entry in extracted[label]:
-            title = entry.get("what") or entry.get("pattern") or entry.get("lesson") or entry.get("risk")
+            title = entry.get("what")  # canonical key after normalization
             if title:
                 items.append({
                     "id": _stable_id(label, f"{artifact_id}:{title}"),
@@ -332,15 +396,17 @@ async def import_okf_payload(
 
     for item in normalized["items"]:
         item_id = _stable_id("okf", f"{artifact_id}:{item['title']}")
+        item_type = item["type"].replace(" ", "-").lower() or "knowledge-item"
+        raw_details = {**item.get("details", {}), "okf_source": item.get("source", normalized["source"]), "okf_original_id": item.get("id")}
         item_payload = {
             "id": item_id,
             "artifact_id": artifact_id,
             "title": item["title"][:180],
-            "type": item["type"].replace(" ", "-").lower() or "knowledge-item",
+            "type": item_type,
             "author": item.get("author", normalized["author"]),
             "date": created_at,
             "tags": item.get("tags", normalized["tags"]),
-            "details": {**item.get("details", {}), "okf_source": item.get("source", normalized["source"]), "okf_original_id": item.get("id")},
+            "details": normalize_item_details(raw_details, item_type, "okf"),
             "workspace_id": current_user.workspace_id,
             "review_status": "pending",
         }
@@ -641,7 +707,7 @@ async def ingest_transcript(
     if llm_result.get("llm_error"):
         metadata["llm_error"] = llm_result["llm_error"]
 
-    # Build items from LLM output
+    # Build items from LLM output — details are already normalized by _normalize_llm_result
     items: List[Dict[str, Any]] = []
     for d in llm_result.get("decisions", []):
         t = d.get("what", "").strip()[:180]
@@ -650,13 +716,13 @@ async def ingest_transcript(
                           "title": t, "type": "decision", "author": d.get("who") or request.author,
                           "date": created_at, "tags": request.tags, "details": d})
     for a in llm_result.get("action_items", []):
-        t = a.get("task", "").strip()[:180]
+        t = a.get("what", "").strip()[:180]  # normalized: task → what
         if t:
             items.append({"id": _stable_id("action", f"{artifact_id}:{t}"), "artifact_id": artifact_id,
-                          "title": t, "type": "action-item", "author": a.get("owner") or request.author,
+                          "title": t, "type": "action-item", "author": a.get("who") or request.author,
                           "date": created_at, "tags": request.tags, "details": a})
     for r in llm_result.get("risks", []):
-        t = r.get("risk", "").strip()[:180]
+        t = r.get("what", "").strip()[:180]  # normalized: risk → what
         if t:
             items.append({"id": _stable_id("risk", f"{artifact_id}:{t}"), "artifact_id": artifact_id,
                           "title": t, "type": "risk", "author": request.author,
@@ -939,6 +1005,120 @@ async def create_playbook(
     ))
     await session.commit()
     return playbook
+
+
+# ---------------------------------------------------------------------------
+# Artifacts – update / delete
+# ---------------------------------------------------------------------------
+
+class ArtifactUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    content: Optional[str] = Field(default=None, min_length=1, max_length=100_000)
+    tags: Optional[List[str]] = None
+
+
+@app.put("/knowledge/artifacts/{artifact_id}")
+async def update_artifact(
+    artifact_id: str,
+    body: ArtifactUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    artifact = await session.get(Artifact, artifact_id)
+    if not artifact or artifact.workspace_id != current_user.workspace_id:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if body.title is not None:
+        artifact.title = body.title
+    if body.tags is not None:
+        artifact.tags = body.tags
+    if body.content is not None:
+        artifact.content = body.content
+        # re-extract items when content changes
+        items, relationships = await _persist_artifact(
+            session, current_user.workspace_id, artifact_id,
+            artifact.title, body.content, artifact.source,
+            artifact.source_type or "manual", artifact.author,
+            artifact.tags or [], artifact.created_at, artifact.metadata_ or {},
+        )
+        neo4j_graph.upsert_artifact_graph(_artifact_dict(artifact), items, relationships)
+        await _embed_and_store(items, session)
+        return {**_artifact_dict(artifact), "items": items}
+    await session.commit()
+    return _artifact_dict(artifact)
+
+
+@app.delete("/knowledge/artifacts/{artifact_id}")
+async def delete_artifact(
+    artifact_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    artifact = await session.get(Artifact, artifact_id)
+    if not artifact or artifact.workspace_id != current_user.workspace_id:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    for model, col in [
+        (KnowledgeItem, KnowledgeItem.artifact_id),
+        (Relationship, Relationship.from_id),
+        (ArtifactSummary, ArtifactSummary.artifact_id),
+    ]:
+        rows = (await session.execute(select(model).where(col == artifact_id))).scalars().all()
+        for row in rows:
+            await session.delete(row)
+    await session.delete(artifact)
+    await session.commit()
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge items – update / delete
+# ---------------------------------------------------------------------------
+
+class ItemUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    tags: Optional[List[str]] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+@app.put("/knowledge/items/{item_id}")
+async def update_item(
+    item_id: str,
+    body: ItemUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    item = await session.get(KnowledgeItem, item_id)
+    if not item or item.workspace_id != current_user.workspace_id:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if body.title is not None:
+        item.title = body.title
+    if body.tags is not None:
+        item.tags = body.tags
+    if body.details is not None:
+        item.details = body.details
+    await session.commit()
+    return _item_dict(item)
+
+
+@app.delete("/knowledge/items/{item_id}")
+async def delete_item(
+    item_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    item = await session.get(KnowledgeItem, item_id)
+    if not item or item.workspace_id != current_user.workspace_id:
+        raise HTTPException(status_code=404, detail="Item not found")
+    rels = (await session.execute(
+        select(Relationship).where(
+            (Relationship.from_id == item_id) | (Relationship.to_id == item_id),
+            Relationship.workspace_id == current_user.workspace_id,
+        )
+    )).scalars().all()
+    for rel in rels:
+        await session.delete(rel)
+    await session.delete(item)
+    await session.commit()
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

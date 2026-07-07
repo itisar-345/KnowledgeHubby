@@ -1,9 +1,9 @@
 """
-GraphRAG pipeline — full implementation.
+GraphRAG pipeline — local-first.
 
 Stages
 ------
-1. Query transformation   – rewrite into sub-queries + HyDE document
+1. Query transformation   – rewrite into sub-queries (+ HyDE when LLM available)
 2. Query routing          – classify intent → pick retrieval strategy
 3. Fusion retrieval       – vector ANN + BM25 merged with RRF
 4. Summary index          – inject artifact-level summaries as context prefix
@@ -11,24 +11,25 @@ Stages
 6. Reranking              – LLM cross-encoder rerank of top candidates
 7. Context assembly       – structured window: summaries | ranked items | neighbours
 8. LLM generation         – grounded answer with multi-turn history support
+
+Embedding and LLM calls are routed through embeddings.py / llm_client.py,
+which default to sentence-transformers + Ollama and upgrade to OpenAI when
+the appropriate env vars are set.
 """
 from __future__ import annotations
 
 import json
 import logging
 import math
-import os
 import re
 import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+from app.services import embeddings as emb
+from app.services import llm_client
 
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
-EMBED_MODEL     = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
-CHAT_MODEL      = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-RERANK_MODEL    = os.getenv("OPENAI_RERANK_MODEL", CHAT_MODEL)
+logger = logging.getLogger(__name__)
 
 # ── route → system prompt ────────────────────────────────────────────────────
 _SYSTEM: Dict[str, str] = {
@@ -55,37 +56,21 @@ _SYSTEM: Dict[str, str] = {
 }
 _SYSTEM["fallback"] = _SYSTEM["factual"]
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Embedding helpers
+# 1. Embedding helpers (delegated to embeddings.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def embed(text: str) -> Optional[List[float]]:
-    if not OPENAI_API_KEY:
-        return None
-    try:
-        from openai import AsyncOpenAI
-        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).embeddings.create(
-            model=EMBED_MODEL, input=text[:8000]
-        )
-        return r.data[0].embedding
-    except Exception as exc:
-        logger.warning("embed() failed: %s", exc)
-        return None
+    return await emb.embed(text)
 
 
 async def embed_items(items: List[Dict[str, Any]]) -> List[Tuple[str, List[float]]]:
-    if not OPENAI_API_KEY or not items:
+    if not items:
         return []
-    try:
-        from openai import AsyncOpenAI
-        texts = [_item_text(i) for i in items]
-        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).embeddings.create(
-            model=EMBED_MODEL, input=texts
-        )
-        return [(items[i]["id"], d.embedding) for i, d in enumerate(r.data)]
-    except Exception as exc:
-        logger.warning("embed_items() failed: %s", exc)
-        return []
+    texts = [_item_text(i) for i in items]
+    vecs = await emb.embed_batch(texts)
+    return [(items[i]["id"], v) for i, v in enumerate(vecs) if v is not None]
 
 
 def _item_text(item: Dict[str, Any]) -> str:
@@ -101,13 +86,6 @@ def _item_text(item: Dict[str, Any]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def transform_query(question: str) -> Dict[str, Any]:
-    """
-    Returns:
-        sub_queries : list[str]  – 3 rewritten variants of the question
-        hyde_doc    : str        – hypothetical answer document for HyDE embedding
-    """
-    if not OPENAI_API_KEY:
-        return {"sub_queries": [question], "hyde_doc": question}
     prompt = (
         "Given the user question below, produce a JSON object with two keys:\n"
         "  sub_queries: list of 3 distinct rewritten versions that cover different "
@@ -117,24 +95,22 @@ async def transform_query(question: str) -> Dict[str, Any]:
         "Return ONLY the JSON object.\n\n"
         f"Question: {question}"
     )
-    try:
-        from openai import AsyncOpenAI
-        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        data = json.loads(r.choices[0].message.content)
-        sub_queries = data.get("sub_queries") or [question]
-        hyde_doc    = data.get("hyde_doc") or question
-        # always include the original
-        if question not in sub_queries:
-            sub_queries = [question] + sub_queries[:3]
-        return {"sub_queries": sub_queries[:4], "hyde_doc": hyde_doc}
-    except Exception as exc:
-        logger.warning("transform_query() failed: %s", exc)
-        return {"sub_queries": [question], "hyde_doc": question}
+    content = await llm_client.chat(
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        json_mode=True,
+    )
+    if content:
+        try:
+            data = json.loads(content)
+            sub_queries = data.get("sub_queries") or [question]
+            hyde_doc    = data.get("hyde_doc") or question
+            if question not in sub_queries:
+                sub_queries = [question] + sub_queries[:3]
+            return {"sub_queries": sub_queries[:4], "hyde_doc": hyde_doc}
+        except Exception as exc:
+            logger.warning("transform_query() parse failed: %s", exc)
+    return {"sub_queries": [question], "hyde_doc": question}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,8 +124,8 @@ _ROUTE_HINTS = {
     "exploratory": ["why", "explain", "tell me about", "overview", "discuss"],
 }
 
+
 def route_query(question: str) -> str:
-    """Lightweight heuristic routing; LLM override when API key available."""
     q = question.lower()
     for route, hints in _ROUTE_HINTS.items():
         if any(h in q for h in hints):
@@ -158,31 +134,26 @@ def route_query(question: str) -> str:
 
 
 async def route_query_llm(question: str) -> str:
-    if not OPENAI_API_KEY:
-        return route_query(question)
     prompt = (
         "Classify the following question into exactly one category: "
         "factual | exploratory | comparative | procedural\n"
         "Return only the category word.\n\n"
         f"Question: {question}"
     )
-    try:
-        from openai import AsyncOpenAI
-        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=10,
-        )
-        label = r.choices[0].message.content.strip().lower()
-        return label if label in _SYSTEM else "exploratory"
-    except Exception as exc:
-        logger.warning("route_query_llm() failed: %s — using heuristic", exc)
-        return route_query(question)
+    content = await llm_client.chat(
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=10,
+    )
+    if content:
+        label = content.strip().lower()
+        if label in _SYSTEM:
+            return label
+    return route_query(question)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. BM25 index (in-memory, built on the fly from fallback items)
+# 4. BM25 index (in-memory)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _tokenise(text: str) -> List[str]:
@@ -197,33 +168,27 @@ def _build_bm25_scores(
 ) -> List[Tuple[float, Dict[str, Any]]]:
     if not query_tokens or not items:
         return []
-
     corpus = [_tokenise(_item_text(i)) for i in items]
     avg_dl = sum(len(d) for d in corpus) / max(len(corpus), 1)
-
-    # IDF
     df: Dict[str, int] = defaultdict(int)
     for doc in corpus:
         for t in set(doc):
             df[t] += 1
     N = len(corpus)
     idf = {t: math.log((N - df[t] + 0.5) / (df[t] + 0.5) + 1) for t in df}
-
     scored = []
     for item, doc in zip(items, corpus):
         tf_map: Dict[str, int] = defaultdict(int)
         for t in doc:
             tf_map[t] += 1
         dl = len(doc)
-        score = 0.0
-        for t in query_tokens:
-            if t not in idf:
-                continue
-            tf = tf_map.get(t, 0)
-            score += idf[t] * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avg_dl))
+        score = sum(
+            idf[t] * (tf_map.get(t, 0) * (k1 + 1))
+            / (tf_map.get(t, 0) + k1 * (1 - b + b * dl / avg_dl))
+            for t in query_tokens if t in idf
+        )
         if score > 0:
             scored.append((score, item))
-
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored
 
@@ -244,11 +209,11 @@ def _sqlite_vector_search(
     items: List[Dict[str, Any]],
     top_k: int,
 ) -> List[Tuple[float, Dict[str, Any]]]:
-    scored = []
-    for item in items:
-        emb = item.get("embedding")
-        if emb and len(emb) == len(query_vec):
-            scored.append((_cosine(query_vec, emb), item))
+    scored = [
+        (_cosine(query_vec, item["embedding"]), item)
+        for item in items
+        if item.get("embedding") and len(item["embedding"]) == len(query_vec)
+    ]
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[:top_k]
 
@@ -257,17 +222,9 @@ def _sqlite_vector_search(
 # 6. Reciprocal Rank Fusion
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _rrf(
-    ranked_lists: List[List[Dict[str, Any]]],
-    k: int = 60,
-) -> List[Dict[str, Any]]:
-    """
-    Merge multiple ranked lists using RRF.
-    Higher combined score = more relevant across sources.
-    """
+def _rrf(ranked_lists: List[List[Dict[str, Any]]], k: int = 60) -> List[Dict[str, Any]]:
     scores: Dict[str, float] = defaultdict(float)
     items_by_id: Dict[str, Dict[str, Any]] = {}
-
     for ranked in ranked_lists:
         for rank, item in enumerate(ranked, start=1):
             iid = item.get("id", "")
@@ -275,7 +232,6 @@ def _rrf(
                 continue
             scores[iid] += 1.0 / (k + rank)
             items_by_id[iid] = item
-
     merged = sorted(items_by_id.values(), key=lambda i: scores[i["id"]], reverse=True)
     for item in merged:
         item["rrf_score"] = scores[item["id"]]
@@ -311,7 +267,7 @@ def _sqlite_graph_expand(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. LLM reranking (cross-encoder style)
+# 8. LLM reranking
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def rerank(
@@ -319,19 +275,13 @@ async def rerank(
     candidates: List[Dict[str, Any]],
     top_n: int = 8,
 ) -> List[Dict[str, Any]]:
-    """
-    Ask the LLM to score each candidate 0-10 for relevance to the question.
-    Falls back to RRF score order when API unavailable or call fails.
-    """
-    if not OPENAI_API_KEY or len(candidates) <= top_n:
+    if len(candidates) <= top_n:
         return candidates[:top_n]
 
-    snippets = []
-    for i, c in enumerate(candidates):
-        title = c.get("title") or c.get("label", "")
-        kind  = c.get("kind") or c.get("type", "")
-        snippets.append(f"{i}: [{kind}] {title}")
-
+    snippets = [
+        f"{i}: [{c.get('kind') or c.get('type', '')}] {c.get('title') or c.get('label', '')}"
+        for i, c in enumerate(candidates)
+    ]
     prompt = (
         f"Question: {question}\n\n"
         "Rate each candidate's relevance to the question from 0 (irrelevant) "
@@ -339,24 +289,21 @@ async def rerank(
         "same order, e.g. [8,3,10,...].\n\n"
         "Candidates:\n" + "\n".join(snippets)
     )
-    try:
-        from openai import AsyncOpenAI
-        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-            model=RERANK_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=256,
-            response_format={"type": "json_object"},
-        )
-        # model may return {"scores": [...]} or just [...]
-        raw = json.loads(r.choices[0].message.content)
-        scores: List[int] = raw if isinstance(raw, list) else raw.get("scores", [])
-        if len(scores) == len(candidates):
-            paired = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
-            return [c for _, c in paired[:top_n]]
-    except Exception as exc:
-        logger.warning("rerank() failed: %s — using RRF order", exc)
-
+    content = await llm_client.chat(
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=256,
+        json_mode=True,
+    )
+    if content:
+        try:
+            raw = json.loads(content)
+            scores: List[int] = raw if isinstance(raw, list) else raw.get("scores", [])
+            if len(scores) == len(candidates):
+                paired = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+                return [c for _, c in paired[:top_n]]
+        except Exception as exc:
+            logger.warning("rerank() parse failed: %s — using RRF order", exc)
     return candidates[:top_n]
 
 
@@ -369,20 +316,12 @@ def _build_context(
     ranked_items: List[Dict[str, Any]],
     graph_neighbours: List[Dict[str, Any]],
 ) -> str:
-    """
-    Structured context window:
-      SECTION A — artifact summaries (high-level orientation)
-      SECTION B — ranked knowledge items (primary evidence)
-      SECTION C — graph neighbours (related context)
-    """
     parts: List[str] = []
-
     if summaries:
         lines = ["=== ARTIFACT SUMMARIES ==="]
         for s in summaries:
             lines.append(f"[{s.get('artifact_id','?')}] {s.get('title','')}: {s.get('summary','')}")
         parts.append("\n".join(lines))
-
     if ranked_items:
         lines = ["=== KNOWLEDGE ITEMS ==="]
         for n in ranked_items:
@@ -395,16 +334,11 @@ def _build_context(
                 if isinstance(v, str) and v and k not in ("evidence", "confidence"):
                     lines.append(f"  {k}: {v}")
         parts.append("\n".join(lines))
-
     if graph_neighbours:
         lines = ["=== RELATED CONTEXT (graph) ==="]
         for n in graph_neighbours:
-            nid   = n.get("id", "?")
-            title = n.get("title") or n.get("label", "")
-            kind  = n.get("kind") or n.get("type", "")
-            lines.append(f"[{nid}] ({kind}): {title}")
+            lines.append(f"[{n.get('id','?')}] ({n.get('kind') or n.get('type','')}): {n.get('title') or n.get('label','')}")
         parts.append("\n".join(lines))
-
     return "\n\n".join(parts)
 
 
@@ -420,32 +354,17 @@ async def _generate(
 ) -> str:
     system = _SYSTEM.get(route, _SYSTEM["factual"])
     user_msg = f"Context:\n{context}\n\nQuestion: {question}"
-
-    if not OPENAI_API_KEY:
-        return _offline_answer(question, context)
-
     messages = [{"role": "system", "content": system}]
     if history:
-        messages.extend(history[-6:])   # keep last 3 turns (6 messages)
+        messages.extend(history[-6:])
     messages.append({"role": "user", "content": user_msg})
 
-    try:
-        from openai import AsyncOpenAI
-        r = await AsyncOpenAI(api_key=OPENAI_API_KEY).chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=1000,
-        )
-        return r.choices[0].message.content.strip()
-    except Exception as exc:
-        logger.warning("LLM generation failed: %s", exc)
-        return f"LLM error: {exc}\n\n{_offline_answer(question, context)}"
-
-
-def _offline_answer(question: str, context: str) -> str:
+    content = await llm_client.chat(messages=messages, temperature=0.2, max_tokens=1000)
+    if content:
+        return content
+    # offline fallback — surface context directly
     preview = context[:600].replace("\n", " ")
-    return f"[No API key] Relevant context for '{question}':\n{preview}"
+    return f"[LLM unavailable] Relevant context for '{question}':\n{preview}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,7 +392,7 @@ def _extract_citations(answer: str, nodes: List[Dict[str, Any]]) -> List[str]:
 
 async def graphrag_query(
     question: str,
-    neo4j_store,                                    # Neo4jGraphStore
+    neo4j_store,
     fallback_items: Optional[List[Dict[str, Any]]] = None,
     cross_links:    Optional[List[Dict[str, Any]]] = None,
     artifact_summaries: Optional[List[Dict[str, Any]]] = None,
@@ -482,23 +401,19 @@ async def graphrag_query(
 ) -> Dict[str, Any]:
     t0 = time.monotonic()
 
-    # ── Stage 1: query transformation ──────────────────────────────────────
-    transformed   = await transform_query(question)
-    sub_queries   = transformed["sub_queries"]
-    hyde_doc      = transformed["hyde_doc"]
+    transformed = await transform_query(question)
+    sub_queries  = transformed["sub_queries"]
+    hyde_doc     = transformed["hyde_doc"]
 
-    # ── Stage 2: query routing ─────────────────────────────────────────────
     route = await route_query_llm(question)
 
-    # ── Stage 3 + 4: fusion retrieval ─────────────────────────────────────
     all_context_nodes: List[Dict[str, Any]] = []
     retrieval_mode = "none"
     summaries_used: List[Dict[str, Any]] = []
 
-    # Embed original + HyDE doc; collect multiple query vectors
     query_vecs = [v for v in [
-        await embed(question),
-        await embed(hyde_doc) if hyde_doc != question else None,
+        await emb.embed(question),
+        await emb.embed(hyde_doc) if hyde_doc != question else None,
     ] if v is not None]
 
     # ── PRIMARY: Neo4j ──────────────────────────────────────────────────────
@@ -508,62 +423,46 @@ async def graphrag_query(
             hits = neo4j_store.retrieve_for_rag(qv, top_k=top_k)
             if hits:
                 vec_lists.append(hits)
-
-        # also embed sub-queries for additional diversity
         for sq in sub_queries[1:3]:
-            sqv = await embed(sq)
+            sqv = await emb.embed(sq)
             if sqv:
                 hits = neo4j_store.vector_search(sqv, top_k=top_k // 2)
                 if hits:
                     vec_lists.append(hits)
-
         if vec_lists:
-            fused = _rrf(vec_lists)
-            all_context_nodes = fused
+            all_context_nodes = _rrf(vec_lists)
             retrieval_mode = "neo4j_graphrag_fusion"
-
-        # summary index via Neo4j
         if query_vecs:
             summaries_used = neo4j_store.summary_vector_search(query_vecs[0], top_k=3)
 
     # ── FALLBACK: SQLite ────────────────────────────────────────────────────
     if not all_context_nodes and fallback_items:
         item_map = {i["id"]: i for i in fallback_items}
-
-        # vector lists per sub-query
         vec_lists = []
         for qv in query_vecs:
             hits = _sqlite_vector_search(qv, fallback_items, top_k)
             if hits:
                 vec_lists.append([{**item, "score": score, "retrieved_by": "sqlite_vector"}
                                    for score, item in hits])
-
-        # BM25 list
         q_tokens = _tokenise(question)
-        bm25_hits = _build_bm25_scores(q_tokens, fallback_items, )
+        bm25_hits = _build_bm25_scores(q_tokens, fallback_items)
         if bm25_hits:
             vec_lists.append([{**item, "score": score, "retrieved_by": "bm25"}
                                for score, item in bm25_hits[:top_k]])
-
         if vec_lists:
             fused = _rrf(vec_lists)
             seed_ids    = [n["id"] for n in fused[:top_k]]
             seed_scores = {n["id"]: n.get("rrf_score", 0.0) for n in fused[:top_k]}
-
             neighbours: List[Dict[str, Any]] = []
             if cross_links:
                 neighbours = _sqlite_graph_expand(seed_ids, cross_links, item_map, seed_scores)
-
             seen = {n["id"] for n in fused}
             for nb in neighbours:
                 if nb["id"] not in seen:
                     seen.add(nb["id"])
                     fused.append(nb)
-
             all_context_nodes = fused
             retrieval_mode = "sqlite_fusion_graph" if query_vecs else "bm25_graph"
-
-        # summary index via SQLite
         if artifact_summaries and query_vecs:
             sv = _sqlite_vector_search(query_vecs[0], artifact_summaries, 3)
             summaries_used = [item for _, item in sv]
@@ -580,18 +479,12 @@ async def graphrag_query(
             "latency_ms": int((time.monotonic() - t0) * 1000),
         }
 
-    # ── Stage 5: reranking ─────────────────────────────────────────────────
-    reranked = await rerank(question, all_context_nodes, top_n=top_k)
-
-    # separate graph neighbours (retrieved_by == graph / sqlite_graph)
+    reranked  = await rerank(question, all_context_nodes, top_n=top_k)
     primary   = [n for n in reranked if "graph" not in n.get("retrieved_by", "")]
     graph_nbr = [n for n in reranked if "graph" in n.get("retrieved_by", "")]
 
-    # ── Stage 6: context assembly ──────────────────────────────────────────
-    context = _build_context(summaries_used, primary, graph_nbr)
-
-    # ── Stage 7: generation ────────────────────────────────────────────────
-    answer   = await _generate(question, context, route, history)
+    context   = _build_context(summaries_used, primary, graph_nbr)
+    answer    = await _generate(question, context, route, history)
     citations = _extract_citations(answer, reranked)
 
     return {

@@ -14,7 +14,9 @@ except ImportError:
     ServiceUnavailable = Exception  # type: ignore
     AuthError = Exception  # type: ignore
 
-EMBEDDING_DIM = 1536  # text-embedding-3-small
+# 384 for all-MiniLM-L6-v2 (local default); 1536 for text-embedding-3-small (OpenAI)
+import os as _os
+EMBEDDING_DIM: int = int(_os.getenv("EMBEDDING_DIM", "384"))
 
 
 class Neo4jGraphStore:

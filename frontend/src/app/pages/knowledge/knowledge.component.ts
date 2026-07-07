@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core'
+import { Component, OnInit, ElementRef, ViewChild, HostListener } from '@angular/core'
 import { CommonModule } from '@angular/common'
 import { FormsModule } from '@angular/forms'
 import { RouterLink } from '@angular/router'
@@ -12,6 +12,7 @@ type GraphResponse = { nodes: Array<{ id: string; label: string; type: string }>
 type IngestMode = 'text' | 'file' | 'url' | 'transcript'
 type EdgeWithPos = { source: string; target: string; label: string; sx: number; sy: number; tx: number; ty: number }
 type NodeWithPos = { id: string; label: string; type: string; x: number; y: number }
+type Transform = { x: number; y: number; k: number }
 
 @Component({
   selector: 'app-knowledge',
@@ -142,31 +143,81 @@ type NodeWithPos = { id: string; label: string; type: string; x: number; y: numb
         </div>
       </section>
 
+      <!-- Artifacts list with edit / delete -->
+      <section class="ingest-panel" *ngIf="data.artifacts.length > 0">
+        <h3>Artifacts <span style="font-weight:400;color:#667085;font-size:0.875rem">({{ data.artifacts.length }})</span></h3>
+        <div class="artifact-list">
+          <div *ngFor="let a of data.artifacts" class="artifact-row">
+            <ng-container *ngIf="editingArtifactId !== a.id; else editArtifact">
+              <div class="artifact-row-info">
+                <strong>{{ a.title }}</strong>
+                <span class="muted-text">by {{ a.author }} &middot; {{ a.created_at | date }}</span>
+              </div>
+              <div class="artifact-row-actions">
+                <button (click)="startEditArtifact(a)">Edit</button>
+                <button class="danger" (click)="deleteArtifact(a.id)" [disabled]="deletingId === a.id">
+                  {{ deletingId === a.id ? 'Deleting…' : 'Delete' }}
+                </button>
+              </div>
+            </ng-container>
+            <ng-template #editArtifact>
+              <div style="display:flex;flex-direction:column;gap:0.5rem;flex:1">
+                <input [(ngModel)]="editArtifactTitle" placeholder="Title" />
+                <input [(ngModel)]="editArtifactTags" placeholder="Tags, comma separated" />
+              </div>
+              <div class="artifact-row-actions">
+                <button class="primary" (click)="saveArtifact(a.id)" [disabled]="saving">{{ saving ? 'Saving…' : 'Save' }}</button>
+                <button (click)="editingArtifactId = ''" [disabled]="saving">Cancel</button>
+              </div>
+            </ng-template>
+          </div>
+        </div>
+      </section>
+
       <section class="graph-panel">
         <div class="graph-header">
           <div>
             <h3>Knowledge Graph</h3>
             <p>{{ graph.nodes.length }} nodes · {{ graph.edges.length }} relationships</p>
           </div>
-          <a *ngIf="selectedNode" class="detail-link" [routerLink]="['/knowledge', selectedNode.id]">Open details</a>
+          <div style="display:flex;align-items:center;gap:0.5rem">
+            <a *ngIf="selectedNode" class="detail-link" [routerLink]="['/knowledge', selectedNode.id]">Open details</a>
+          </div>
         </div>
         <ng-container *ngIf="graph.nodes.length > 0; else emptyGraph">
           <div class="graph-layout">
-            <svg class="knowledge-graph" viewBox="0 0 760 420" role="img" aria-label="Knowledge graph visualization">
-              <g *ngFor="let edge of edgesWithPos">
-                <line [class]="isEdgeSelected(edge) ? 'graph-edge selected' : 'graph-edge'"
-                  [attr.x1]="edge.sx" [attr.y1]="edge.sy" [attr.x2]="edge.tx" [attr.y2]="edge.ty" />
-                <text class="graph-edge-label" [attr.x]="(edge.sx+edge.tx)/2" [attr.y]="(edge.sy+edge.ty)/2-6">{{ edge.label }}</text>
-              </g>
-              <g *ngFor="let node of nodesWithPos"
-                [class]="selectedNodeId === node.id ? 'graph-node selected' : 'graph-node ' + node.type"
-                role="button" tabindex="0"
-                (click)="selectedNodeId = node.id"
-                (keydown.enter)="selectedNodeId = node.id">
-                <circle [attr.cx]="node.x" [attr.cy]="node.y" [attr.r]="node.type === 'artifact' ? 24 : 18" />
-                <text [attr.x]="node.x" [attr.y]="node.y + 42">{{ node.label.length > 34 ? node.label.slice(0,31) + '…' : node.label }}</text>
-              </g>
-            </svg>
+            <div class="graph-canvas-wrap">
+              <div class="graph-zoom-bar">
+                <button class="graph-zoom-btn" (click)="zoomIn()" title="Zoom in">+</button>
+                <span class="graph-zoom-level">{{ (transform.k * 100) | number:'1.0-0' }}%</span>
+                <button class="graph-zoom-btn" (click)="zoomOut()" title="Zoom out">−</button>
+                <button class="graph-zoom-btn" (click)="resetView()" title="Reset view">⊙</button>
+              </div>
+              <svg #graphSvg class="knowledge-graph"
+                role="img" aria-label="Knowledge graph visualization"
+                (wheel)="onWheel($event)"
+                (mousedown)="onSvgMouseDown($event)"
+                (mousemove)="onMouseMove($event)"
+                (mouseup)="onMouseUp($event)"
+                (mouseleave)="onMouseUp($event)">
+                <g [attr.transform]="svgTransform">
+                  <g *ngFor="let edge of edgesWithPos">
+                    <line [class]="isEdgeSelected(edge) ? 'graph-edge selected' : 'graph-edge'"
+                      [attr.x1]="edge.sx" [attr.y1]="edge.sy" [attr.x2]="edge.tx" [attr.y2]="edge.ty" />
+                    <text class="graph-edge-label" [attr.x]="(edge.sx+edge.tx)/2" [attr.y]="(edge.sy+edge.ty)/2-6">{{ edge.label }}</text>
+                  </g>
+                  <g *ngFor="let node of nodesWithPos"
+                    [class]="selectedNodeId === node.id ? 'graph-node selected' : 'graph-node ' + node.type"
+                    role="button" tabindex="0"
+                    (click)="onNodeClick($event, node)"
+                    (mousedown)="onNodeMouseDown($event, node)"
+                    (keydown.enter)="selectedNodeId = node.id">
+                    <circle [attr.cx]="node.x" [attr.cy]="node.y" [attr.r]="node.type === 'artifact' ? 24 : 18" />
+                    <text [attr.x]="node.x" [attr.y]="node.y + (node.type === 'artifact' ? 34 : 28)">{{ node.label.length > 28 ? node.label.slice(0,25) + '…' : node.label }}</text>
+                  </g>
+                </g>
+              </svg>
+            </div>
             <aside class="graph-inspector">
               <ng-container *ngIf="selectedNode; else noSelection">
                 <span class="type-pill">{{ selectedNode.type }}</span>
@@ -199,6 +250,8 @@ type NodeWithPos = { id: string; label: string; type: string; x: number; y: numb
   `
 })
 export class KnowledgeComponent implements OnInit {
+  @ViewChild('graphSvg') graphSvgRef!: ElementRef<SVGSVGElement>
+
   data: KnowledgeResponse = { artifacts: [], knowledge_items: [], relationships: [], playbooks: [] }
   graph: GraphResponse = { nodes: [], edges: [], layout: 'force-directed' }
   query = ''; typeFilter = 'all'; loading = false; error = ''
@@ -208,6 +261,24 @@ export class KnowledgeComponent implements OnInit {
   urlValue = ''; urlTitle = ''; urlAuthor = ''; urlTags = ''
   txTitle = ''; txAuthor = ''; txTags = ''; txContent = ''; txSourceType = 'transcript'; txSummary = ''
   linkingCross = false; crossLinkCount: number | null = null
+
+  // artifact CRUD
+  editingArtifactId = ''; editArtifactTitle = ''; editArtifactTags = ''
+  deletingId = ''; saving = false
+
+  // ── pan / zoom state ────────────────────────────────────────────────────
+  transform: Transform = { x: 0, y: 0, k: 1 }
+  private _panning = false
+  private _panStart = { x: 0, y: 0 }
+  private _draggingNode: NodeWithPos | null = null
+  private _dragMoved = false
+  private readonly ZOOM_MIN = 0.2
+  private readonly ZOOM_MAX = 4
+  private readonly ZOOM_STEP = 0.15
+
+  get svgTransform() {
+    return `translate(${this.transform.x},${this.transform.y}) scale(${this.transform.k})`
+  }
 
   readonly ingestModes = [
     { key: 'text' as IngestMode, label: 'Text' },
@@ -278,6 +349,88 @@ export class KnowledgeComponent implements OnInit {
     const otherId = edge.source === this.selectedNodeId ? edge.target : edge.source
     return this.graph.nodes.find(n => n.id === otherId)?.label || otherId
   }
+
+  // ── zoom / pan handlers ─────────────────────────────────────────────────
+
+  onWheel(e: WheelEvent) {
+    e.preventDefault()
+    const svg = this.graphSvgRef?.nativeElement
+    if (!svg) return
+    const rect = svg.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    const delta = e.deltaY < 0 ? this.ZOOM_STEP : -this.ZOOM_STEP
+    this._applyZoom(delta, mx, my)
+  }
+
+  zoomIn()  { const c = this._center(); this._applyZoom( this.ZOOM_STEP, c.x, c.y) }
+  zoomOut() { const c = this._center(); this._applyZoom(-this.ZOOM_STEP, c.x, c.y) }
+
+  resetView() {
+    this.transform = { x: 0, y: 0, k: 1 }
+  }
+
+  private _applyZoom(delta: number, mx: number, my: number) {
+    const k0 = this.transform.k
+    const k1 = Math.min(this.ZOOM_MAX, Math.max(this.ZOOM_MIN, k0 + delta))
+    const ratio = k1 / k0
+    this.transform = {
+      x: mx - ratio * (mx - this.transform.x),
+      y: my - ratio * (my - this.transform.y),
+      k: k1,
+    }
+  }
+
+  private _center(): { x: number; y: number } {
+    const svg = this.graphSvgRef?.nativeElement
+    if (!svg) return { x: 380, y: 210 }
+    const r = svg.getBoundingClientRect()
+    return { x: r.width / 2, y: r.height / 2 }
+  }
+
+  onSvgMouseDown(e: MouseEvent) {
+    if (this._draggingNode) return
+    this._panning = true
+    this._panStart = { x: e.clientX - this.transform.x, y: e.clientY - this.transform.y }
+  }
+
+  onNodeMouseDown(e: MouseEvent, node: NodeWithPos) {
+    e.stopPropagation()
+    this._draggingNode = node
+    this._dragMoved = false
+  }
+
+  onNodeClick(e: MouseEvent, node: NodeWithPos) {
+    if (!this._dragMoved) this.selectedNodeId = node.id
+  }
+
+  onMouseMove(e: MouseEvent) {
+    if (this._draggingNode) {
+      this._dragMoved = true
+      const k = this.transform.k
+      const svg = this.graphSvgRef?.nativeElement
+      if (!svg) return
+      const rect = svg.getBoundingClientRect()
+      const svgX = (e.clientX - rect.left - this.transform.x) / k
+      const svgY = (e.clientY - rect.top  - this.transform.y) / k
+      this.posMap.set(this._draggingNode.id, { x: svgX, y: svgY })
+      return
+    }
+    if (!this._panning) return
+    this.transform = {
+      ...this.transform,
+      x: e.clientX - this._panStart.x,
+      y: e.clientY - this._panStart.y,
+    }
+  }
+
+  onMouseUp(_e: MouseEvent) {
+    this._panning = false
+    this._draggingNode = null
+  }
+
+  @HostListener('window:mouseup')
+  onWindowMouseUp() { this._panning = false; this._draggingNode = null }
 
   async loadKnowledge() {
     try {
@@ -352,6 +505,35 @@ export class KnowledgeComponent implements OnInit {
       await this.loadKnowledge()
     } catch (e: any) { this.error = e?.message || 'Transcript ingestion failed' }
     finally { this.loading = false }
+  }
+
+  startEditArtifact(a: any) {
+    this.editingArtifactId = a.id
+    this.editArtifactTitle = a.title
+    this.editArtifactTags = (a.tags || []).join(', ')
+  }
+
+  async saveArtifact(id: string) {
+    this.saving = true; this.error = ''
+    try {
+      await firstValueFrom(this.http.put(`${API_BASE}/knowledge/artifacts/${id}`, {
+        title: this.editArtifactTitle,
+        tags: this.editArtifactTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+      }, { headers: this.auth.authHeaders() }))
+      this.editingArtifactId = ''
+      await this.loadKnowledge()
+    } catch (e: any) { this.error = e?.message || 'Save failed' }
+    finally { this.saving = false }
+  }
+
+  async deleteArtifact(id: string) {
+    if (!confirm('Delete this artifact and all its extracted knowledge items?')) return
+    this.deletingId = id; this.error = ''
+    try {
+      await firstValueFrom(this.http.delete(`${API_BASE}/knowledge/artifacts/${id}`, { headers: this.auth.authHeaders() }))
+      await this.loadKnowledge()
+    } catch (e: any) { this.error = e?.message || 'Delete failed' }
+    finally { this.deletingId = '' }
   }
 
   async runCrossLink() {

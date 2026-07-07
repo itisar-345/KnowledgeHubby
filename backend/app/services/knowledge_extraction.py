@@ -1,6 +1,8 @@
 import re
 from typing import Dict, List
 
+from app.services.item_schema import calibrated_confidence, normalize_item_details
+
 
 def _unique(values: List[str]) -> List[str]:
     seen = set()
@@ -35,27 +37,31 @@ class KnowledgeExtraction:
         decisions = []
         for sentence in self._sentences(text):
             if self._contains(sentence, self.decision_keywords):
-                decisions.append({
+                has_rationale = bool(re.search(r"\b(because|since|therefore|so that|in order to)\b", sentence, re.IGNORECASE))
+                raw = {
                     "what": sentence,
                     "why": self._extract_rationale(text, sentence),
                     "when": self._extract_date(sentence),
                     "who": self._extract_decision_maker(sentence),
                     "evidence": sentence,
-                    "confidence": self._confidence(sentence, self.decision_keywords),
-                })
+                    "confidence": calibrated_confidence(sentence, self.decision_keywords, has_rationale),
+                }
+                decisions.append(normalize_item_details(raw, "decision", "regex"))
         return self._dedupe_dicts(decisions, "what")
 
     def mine_how_to_patterns(self, text: str) -> List[Dict]:
         patterns = []
         for sentence in self._sentences(text):
             if self._contains(sentence, self.how_to_keywords):
-                patterns.append({
+                raw = {
+                    "what": sentence,
                     "pattern": sentence,
                     "steps": self._extract_steps(sentence),
                     "evidence": sentence,
-                    "confidence": self._confidence(sentence, self.how_to_keywords),
-                })
-        return self._dedupe_dicts(patterns, "pattern")
+                    "confidence": calibrated_confidence(sentence, self.how_to_keywords),
+                }
+                patterns.append(normalize_item_details(raw, "how-to", "regex"))
+        return self._dedupe_dicts(patterns, "what")
 
     def detect_checklists(self, text: str) -> List[str]:
         checklist_items = []
@@ -77,25 +83,29 @@ class KnowledgeExtraction:
         lessons = []
         for sentence in self._sentences(text):
             if self._contains(sentence, self.lesson_keywords):
-                lessons.append({
+                raw = {
+                    "what": sentence,
                     "lesson": sentence,
-                    "context": self._extract_context(text, sentence),
+                    "why": self._extract_context(text, sentence),
                     "evidence": sentence,
-                    "confidence": self._confidence(sentence, self.lesson_keywords),
-                })
-        return self._dedupe_dicts(lessons, "lesson")
+                    "confidence": calibrated_confidence(sentence, self.lesson_keywords),
+                }
+                lessons.append(normalize_item_details(raw, "lesson", "regex"))
+        return self._dedupe_dicts(lessons, "what")
 
     def recognize_risk_patterns(self, text: str) -> List[Dict]:
         risks = []
         for sentence in self._sentences(text):
             if self._contains(sentence, self.risk_keywords):
-                risks.append({
+                raw = {
+                    "what": sentence,
                     "risk": sentence,
                     "severity": self._assess_severity(sentence),
                     "evidence": sentence,
-                    "confidence": self._confidence(sentence, self.risk_keywords),
-                })
-        return self._dedupe_dicts(risks, "risk")
+                    "confidence": calibrated_confidence(sentence, self.risk_keywords),
+                }
+                risks.append(normalize_item_details(raw, "risk", "regex"))
+        return self._dedupe_dicts(risks, "what")
 
     def identify_success_factors(self, text: str) -> List[str]:
         factors = []
@@ -162,13 +172,6 @@ class KnowledgeExtraction:
         lowered = sentence.lower()
         return any(re.search(rf"\b{re.escape(keyword)}\b", lowered) for keyword in keywords)
 
-    def _confidence(self, sentence: str, keywords: tuple[str, ...]) -> float:
-        lowered = sentence.lower()
-        keyword_hits = sum(1 for keyword in keywords if keyword in lowered)
-        rationale_bonus = 1 if re.search(r"\b(because|since|therefore|so that|in order to)\b", lowered) else 0
-        detail_bonus = 1 if len(sentence.split()) >= 8 else 0
-        score = 0.55 + min(keyword_hits, 3) * 0.1 + rationale_bonus * 0.1 + detail_bonus * 0.05
-        return round(min(score, 0.95), 2)
 
     def _dedupe_dicts(self, values: List[Dict], key: str) -> List[Dict]:
         seen = set()

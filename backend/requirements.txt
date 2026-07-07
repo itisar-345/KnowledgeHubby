@@ -11,6 +11,11 @@ aiosqlite==0.19.0
 aiofiles==23.2.1
 PyPDF2==3.0.1
 httpx==0.25.2
+numpy==1.26.4
+
+# Local-first embedding (default)
+sentence-transformers==2.7.0
+
+# Optional: set LLM_PROVIDER=openai + OPENAI_API_KEY to use OpenAI instead of Ollama
 openai==1.12.0
 tiktoken==0.6.0
-numpy==1.26.4

@@ -1,6 +1,7 @@
 import { Component, OnInit } from '@angular/core'
 import { ActivatedRoute, RouterLink } from '@angular/router'
 import { CommonModule } from '@angular/common'
+import { FormsModule } from '@angular/forms'
 import { HttpClient } from '@angular/common/http'
 import { firstValueFrom } from 'rxjs'
 import { AuthService, API_BASE } from '../../services/auth.service'
@@ -14,7 +15,7 @@ type RelatedItem = { item: KnowledgeItem; score: number }
 @Component({
   selector: 'app-knowledge-detail',
   standalone: true,
-  imports: [CommonModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink],
   template: `
     <div class="detail-shell">
       <a class="back-link" routerLink="/knowledge">← Back to hub</a>
@@ -31,13 +32,29 @@ type RelatedItem = { item: KnowledgeItem; score: number }
         <section class="detail-hero">
           <div class="detail-title">
             <span class="type-pill">{{ item.type }}</span>
-            <h2>{{ item.title }}</h2>
+            <ng-container *ngIf="!editing; else editTitle">
+              <h2>{{ item.title }}</h2>
+            </ng-container>
+            <ng-template #editTitle>
+              <input [(ngModel)]="editedTitle" style="font-size:1.4rem;font-weight:600;width:100%" />
+            </ng-template>
           </div>
           <div class="detail-meta-grid">
             <div><span>{{ item.author }}</span></div>
             <div><span>{{ item.date | date:'medium' }}</span></div>
             <div><span>{{ relationships.length }} relationship{{ relationships.length === 1 ? '' : 's' }}</span></div>
             <div><span>{{ item.tags.length }} tag{{ item.tags.length === 1 ? '' : 's' }}</span></div>
+          </div>
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            <ng-container *ngIf="!editing">
+              <button (click)="startEdit()">Edit</button>
+              <button class="danger" (click)="deleteItem()" [disabled]="deleting">{{ deleting ? 'Deleting…' : 'Delete item' }}</button>
+            </ng-container>
+            <ng-container *ngIf="editing">
+              <button class="primary" (click)="saveItem()" [disabled]="saving">{{ saving ? 'Saving…' : 'Save' }}</button>
+              <button (click)="editing = false">Cancel</button>
+            </ng-container>
+            <span *ngIf="crudError" class="error-text">{{ crudError }}</span>
           </div>
         </section>
 
@@ -113,6 +130,8 @@ type RelatedItem = { item: KnowledgeItem; score: number }
 })
 export class KnowledgeDetailComponent implements OnInit {
   data: any = null; error = ''; id = ''
+  editing = false; saving = false; deleting = false; crudError = ''
+  editedTitle = ''
   private crossLinks: CrossLink[] = []
 
   get item(): KnowledgeItem | undefined {
@@ -158,6 +177,40 @@ export class KnowledgeDetailComponent implements OnInit {
       ])
       this.data = kr; this.crossLinks = lr || []
     } catch (e: any) { this.error = e?.message || 'Could not load knowledge item' }
+  }
+
+  startEdit() {
+    this.editedTitle = this.item?.title || ''
+    this.editing = true
+    this.crudError = ''
+  }
+
+  async saveItem() {
+    if (!this.item) return
+    this.saving = true; this.crudError = ''
+    try {
+      await firstValueFrom(this.http.put(
+        `${API_BASE}/knowledge/items/${this.id}`,
+        { title: this.editedTitle },
+        { headers: this.auth.authHeaders() }
+      ))
+      this.editing = false
+      await this.load()
+    } catch (e: any) { this.crudError = e?.message || 'Save failed' }
+    finally { this.saving = false }
+  }
+
+  async deleteItem() {
+    if (!confirm('Delete this knowledge item? This cannot be undone.')) return
+    this.deleting = true; this.crudError = ''
+    try {
+      await firstValueFrom(this.http.delete(
+        `${API_BASE}/knowledge/items/${this.id}`,
+        { headers: this.auth.authHeaders() }
+      ))
+      window.history.back()
+    } catch (e: any) { this.crudError = e?.message || 'Delete failed' }
+    finally { this.deleting = false }
   }
 
   humanize(v: string) { return v.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) }

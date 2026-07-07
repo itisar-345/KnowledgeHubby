@@ -51,10 +51,10 @@ type Message = { role: 'user' | 'assistant'; content: string; citations?: string
                   <div style="margin-top:0.5rem;display:flex;flex-direction:column;gap:0.3rem">
                     @for (n of m.context_nodes; track n.id) {
                       <div style="background:#f8fbfa;border:1px solid #e5ecea;border-radius:5px;padding:0.4rem 0.6rem;font-size:0.8rem">
-                        <span style="color:#667085;margin-right:0.4rem">[{{ n.id?.slice(0,16) }}…]</span>
+                        <span style="color:#667085;margin-right:0.4rem">[{{ n.id.slice(0,16) }}…]</span>
                         <strong>{{ n.title || n.label }}</strong>
                         <span style="color:#667085;margin-left:0.4rem">
-                          ({{ n.kind || n.type }}){{ n.score != null ? ' · ' + n.score!.toFixed(3) : '' }}{{ n.retrieved_by ? ' · via ' + n.retrieved_by : '' }}
+                          ({{ n.kind || n.type }}){{ n.score != null ? ' · ' + n.score.toFixed(3) : '' }}{{ n.retrieved_by ? ' · via ' + n.retrieved_by : '' }}
                         </span>
                       </div>
                     }
