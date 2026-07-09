@@ -9,4 +9,5 @@ export const routes: Routes = [
   { path: 'review', loadComponent: () => import('./pages/review/review.component').then(m => m.ReviewComponent), canActivate: [authGuard] },
   { path: 'search', loadComponent: () => import('./pages/search/search.component').then(m => m.SearchComponent), canActivate: [authGuard] },
   { path: 'graphrag', loadComponent: () => import('./pages/graphrag/graphrag.component').then(m => m.GraphragComponent), canActivate: [authGuard] },
+  { path: 'workspace-settings', loadComponent: () => import('./pages/workspace-settings/workspace-settings.component').then(m => m.WorkspaceSettingsComponent), canActivate: [authGuard] },
 ]

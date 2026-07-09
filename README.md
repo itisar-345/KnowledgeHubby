@@ -30,6 +30,7 @@ Use it for:
 - **Playbook support**: create curated playbooks from structured steps.
 - **OKF import/export**: ingest and export knowledge using an Open Knowledge Format payload.
 - **GraphRAG queries**: ask natural-language questions over the workspace and receive grounded answers with citations and context nodes.
+- **Workspace provider policy**: configure workspace defaults for LLM and embedding providers, enforce local-only mode with an admin kill-switch, and store provider provenance for auditability.
 
 ## Product Architecture
 
@@ -63,6 +64,7 @@ Knowledge Hubs
 |       |   +-- search/            Full-text + filter search
 |       |   +-- review/            Pending item review queue
 |       |   +-- graphrag/          GraphRAG chat interface
+|       |   +-- workspace-settings/ Workspace + provider policy settings
 |       |   +-- login/             Authentication
 |       +-- services/
 |           +-- auth.service.ts    JWT auth + API base
@@ -79,6 +81,7 @@ Knowledge Hubs
 - **Embeddings (default)**: sentence-transformers `all-MiniLM-L6-v2` — runs fully offline, no API key required, dim=384
 - **LLM (default)**: Ollama (`llama3.1:8b` or any local model) — extraction, summarisation, GraphRAG generation and reranking
 - **Cloud upgrade (optional)**: set `EMBEDDING_PROVIDER=openai` and/or `LLM_PROVIDER=openai` with an `OPENAI_API_KEY` to swap in OpenAI models independently
+- **Cloud provider policy**: `ALLOW_CLOUD_PROVIDERS=false` disables OpenAI for all workspaces and enforces local-only runtime across LLM and embedding layers
 - **Runtime**: Docker Compose or local Node/Python processes
 
 ## Run Locally
@@ -217,6 +220,17 @@ The frontend runs on `http://localhost:3000` and the backend runs on `http://loc
 | `GET` | `/knowledge/okf/export` | Export workspace as OKF payload |
 | `POST` | `/knowledge/graphrag/query` | Run GraphRAG query and return grounded answer with citations |
 
+### Workspace & Provider Configuration
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/workspace/settings` | Get current workspace provider policy and active provider names |
+| `PATCH` | `/workspace/settings` | Update workspace provider policy and cloud access flag |
+| `GET` | `/workspace/provider-configs` | List workspace provider configurations |
+| `POST` | `/workspace/provider-configs` | Create a new provider configuration for the workspace |
+| `PUT` | `/workspace/provider-configs/{config_id}` | Update an existing workspace provider configuration |
+| `DELETE` | `/workspace/provider-configs/{config_id}` | Delete a workspace provider configuration |
+
 ## Data Model
 
 Knowledge Hubs stores five primary collections:
@@ -238,6 +252,7 @@ The default persistence layer is Neo4j, which supports rich relationship travers
 | `/search` | Full-text and filtered search across items and artifacts with shareable URLs |
 | `/review` | Review queue for pending knowledge items — accept, reject, or edit before promoting |
 | `/graphrag` | GraphRAG chat — ask questions over the knowledge base, see context nodes and retrieval mode |
+| `/workspace-settings` | Workspace/provider settings — manage default LLM, embedding, and cloud access policies |
 | `/login` | Authentication |
 
 ## Interactive Graph

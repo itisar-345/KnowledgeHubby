@@ -61,15 +61,15 @@ _SYSTEM["fallback"] = _SYSTEM["factual"]
 # 1. Embedding helpers (delegated to embeddings.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def embed(text: str) -> Optional[List[float]]:
-    return await emb.embed(text)
+async def embed(text: str, workspace: Optional[Any] = None) -> Optional[List[float]]:
+    return await emb.embed(text, workspace=workspace)
 
 
-async def embed_items(items: List[Dict[str, Any]]) -> List[Tuple[str, List[float]]]:
+async def embed_items(items: List[Dict[str, Any]], workspace: Optional[Any] = None) -> List[Tuple[str, List[float]]]:
     if not items:
         return []
     texts = [_item_text(i) for i in items]
-    vecs = await emb.embed_batch(texts)
+    vecs = await emb.embed_batch(texts, workspace=workspace)
     return [(items[i]["id"], v) for i, v in enumerate(vecs) if v is not None]
 
 
@@ -85,28 +85,36 @@ def _item_text(item: Dict[str, Any]) -> str:
 # 2. Query transformation  (sub-queries + HyDE)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def transform_query(question: str) -> Dict[str, Any]:
+async def transform_query(question: str, workspace: Optional[Any] = None) -> Dict[str, Any]:
     prompt = (
-        "Given the user question below, produce a JSON object with two keys:\n"
-        "  sub_queries: list of 3 distinct rewritten versions that cover different "
-        "angles (synonyms, specificity levels, related concepts).\n"
-        "  hyde_doc: a short hypothetical answer document (2-3 sentences) that "
-        "a perfect knowledge base would contain.\n"
-        "Return ONLY the JSON object.\n\n"
+        "Rewrite the user question below into 3 distinct versions that cover "
+        "different angles (synonyms, specificity levels, related concepts). "
+        "Also write a short hypothetical answer document (2-3 sentences) that "
+        "a perfect knowledge base would contain.\n\n"
+        "OUTPUT RULES:\n"
+        "- Return ONLY a JSON object, no markdown, no explanation.\n"
+        "- Shape: {\"sub_queries\": [\"...\", \"...\", \"...\"], \"hyde_doc\": \"...\"}\n\n"
         f"Question: {question}"
     )
     content = await llm_client.chat(
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
+        max_tokens=300,
         json_mode=True,
+        workspace=workspace,
     )
     if content:
         try:
-            data = json.loads(content)
+            # tolerate accidental markdown fences from local models
+            import re as _re
+            cleaned = _re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=_re.IGNORECASE)
+            cleaned = _re.sub(r"\s*```$", "", cleaned.strip())
+            data = json.loads(cleaned)
             sub_queries = data.get("sub_queries") or [question]
             hyde_doc    = data.get("hyde_doc") or question
             if question not in sub_queries:
                 sub_queries = [question] + sub_queries[:3]
+            # Phase 3: cap fan-out at 4 to keep local latency acceptable
             return {"sub_queries": sub_queries[:4], "hyde_doc": hyde_doc}
         except Exception as exc:
             logger.warning("transform_query() parse failed: %s", exc)
@@ -124,6 +132,62 @@ _ROUTE_HINTS = {
     "exploratory": ["why", "explain", "tell me about", "overview", "discuss"],
 }
 
+# Canonical route exemplars for embedding-similarity classification (Phase 3).
+# Avoids a full LLM generation call for unambiguous queries.
+_ROUTE_EXEMPLARS: Dict[str, List[str]] = {
+    "factual":     ["what is X", "who decided Y", "when was Z approved", "which option was chosen"],
+    "comparative": ["compare A and B", "difference between X and Y", "pros and cons of Z"],
+    "procedural":  ["how to deploy", "steps to set up", "guide for implementing", "process for onboarding"],
+    "exploratory": ["why did we choose", "explain the architecture", "tell me about the risks", "overview of the project"],
+}
+
+_exemplar_vecs: Optional[Dict[str, List[List[float]]]] = None
+
+
+async def _get_exemplar_vecs(workspace: Optional[Any] = None) -> Dict[str, List[List[float]]]:
+    """Lazily embed route exemplars once and cache them."""
+    global _exemplar_vecs
+    if _exemplar_vecs is not None:
+        return _exemplar_vecs
+    result: Dict[str, List[List[float]]] = {}
+    for route, phrases in _ROUTE_EXEMPLARS.items():
+        vecs = await emb.embed_batch(phrases, workspace=workspace)
+        result[route] = [v for v in vecs if v is not None]
+    _exemplar_vecs = result
+    return result
+
+
+def _cosine_simple(a: List[float], b: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+async def _route_by_embedding(question: str, workspace: Optional[Any] = None) -> Optional[str]:
+    """
+    Classify query intent using embedding similarity against route exemplars.
+    Returns a route label when confidence is clear (best score > 0.55 and
+    margin over second-best > 0.05), otherwise returns None so the caller
+    can fall back to LLM classification.
+    """
+    q_vec = await emb.embed(question, workspace=workspace)
+    if q_vec is None:
+        return None
+    exemplars = await _get_exemplar_vecs(workspace=workspace)
+    route_scores: Dict[str, float] = {}
+    for route, vecs in exemplars.items():
+        if vecs:
+            route_scores[route] = max(_cosine_simple(q_vec, v) for v in vecs)
+    if not route_scores:
+        return None
+    ranked = sorted(route_scores.items(), key=lambda x: x[1], reverse=True)
+    best_route, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best_score > 0.55 and (best_score - second_score) > 0.05:
+        return best_route
+    return None
+
 
 def route_query(question: str) -> str:
     q = question.lower()
@@ -133,20 +197,32 @@ def route_query(question: str) -> str:
     return "exploratory"
 
 
-async def route_query_llm(question: str) -> str:
+async def route_query_llm(question: str, workspace: Optional[Any] = None) -> str:
+    # Phase 3: try embedding-similarity classifier first to save an LLM call
+    embedding_route = await _route_by_embedding(question, workspace=workspace)
+    if embedding_route:
+        return embedding_route
+
+    # Ambiguous — fall back to LLM classification
     prompt = (
-        "Classify the following question into exactly one category: "
-        "factual | exploratory | comparative | procedural\n"
-        "Return only the category word.\n\n"
+        "Classify the question into exactly one category.\n"
+        "Categories: factual | exploratory | comparative | procedural\n"
+        "Rules:\n"
+        "- factual: asks for a specific fact, decision, or definition\n"
+        "- exploratory: open-ended, asks for explanation or overview\n"
+        "- comparative: compares two or more things\n"
+        "- procedural: asks for steps or a how-to guide\n"
+        "Return ONLY the single category word, nothing else.\n\n"
         f"Question: {question}"
     )
     content = await llm_client.chat(
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=10,
+        workspace=workspace,
     )
     if content:
-        label = content.strip().lower()
+        label = content.strip().lower().split()[0] if content.strip() else ""
         if label in _SYSTEM:
             return label
     return route_query(question)
@@ -274,6 +350,7 @@ async def rerank(
     question: str,
     candidates: List[Dict[str, Any]],
     top_n: int = 8,
+    workspace: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     if len(candidates) <= top_n:
         return candidates[:top_n]
@@ -285,8 +362,11 @@ async def rerank(
     prompt = (
         f"Question: {question}\n\n"
         "Rate each candidate's relevance to the question from 0 (irrelevant) "
-        "to 10 (highly relevant). Return ONLY a JSON array of integers in the "
-        "same order, e.g. [8,3,10,...].\n\n"
+        "to 10 (highly relevant).\n\n"
+        "OUTPUT RULES:\n"
+        "- Return ONLY a JSON array of integers, one per candidate, in the same order.\n"
+        "- Example for 4 candidates: [8, 3, 10, 1]\n"
+        "- No markdown, no explanation, no extra keys.\n\n"
         "Candidates:\n" + "\n".join(snippets)
     )
     content = await llm_client.chat(
@@ -294,10 +374,14 @@ async def rerank(
         temperature=0,
         max_tokens=256,
         json_mode=True,
+        workspace=workspace,
     )
     if content:
         try:
-            raw = json.loads(content)
+            import re as _re
+            cleaned = _re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=_re.IGNORECASE)
+            cleaned = _re.sub(r"\s*```$", "", cleaned.strip())
+            raw = json.loads(cleaned)
             scores: List[int] = raw if isinstance(raw, list) else raw.get("scores", [])
             if len(scores) == len(candidates):
                 paired = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
@@ -351,6 +435,7 @@ async def _generate(
     context: str,
     route: str,
     history: Optional[List[Dict[str, str]]] = None,
+    workspace: Optional[Any] = None,
 ) -> str:
     system = _SYSTEM.get(route, _SYSTEM["factual"])
     user_msg = f"Context:\n{context}\n\nQuestion: {question}"
@@ -359,7 +444,12 @@ async def _generate(
         messages.extend(history[-6:])
     messages.append({"role": "user", "content": user_msg})
 
-    content = await llm_client.chat(messages=messages, temperature=0.2, max_tokens=1000)
+    content = await llm_client.chat(
+        messages=messages,
+        temperature=0.2,
+        max_tokens=1000,
+        workspace=workspace,
+    )
     if content:
         return content
     # offline fallback — surface context directly
@@ -398,22 +488,23 @@ async def graphrag_query(
     artifact_summaries: Optional[List[Dict[str, Any]]] = None,
     history:        Optional[List[Dict[str, str]]] = None,
     top_k:          int = 8,
+    workspace: Optional[Any] = None,
 ) -> Dict[str, Any]:
     t0 = time.monotonic()
 
-    transformed = await transform_query(question)
+    transformed = await transform_query(question, workspace=workspace)
     sub_queries  = transformed["sub_queries"]
     hyde_doc     = transformed["hyde_doc"]
 
-    route = await route_query_llm(question)
+    route = await route_query_llm(question, workspace=workspace)
 
     all_context_nodes: List[Dict[str, Any]] = []
     retrieval_mode = "none"
     summaries_used: List[Dict[str, Any]] = []
 
     query_vecs = [v for v in [
-        await emb.embed(question),
-        await emb.embed(hyde_doc) if hyde_doc != question else None,
+        await emb.embed(question, workspace=workspace),
+        await emb.embed(hyde_doc, workspace=workspace) if hyde_doc != question else None,
     ] if v is not None]
 
     # ── PRIMARY: Neo4j ──────────────────────────────────────────────────────
@@ -424,7 +515,7 @@ async def graphrag_query(
             if hits:
                 vec_lists.append(hits)
         for sq in sub_queries[1:3]:
-            sqv = await emb.embed(sq)
+            sqv = await emb.embed(sq, workspace=workspace)
             if sqv:
                 hits = neo4j_store.vector_search(sqv, top_k=top_k // 2)
                 if hits:
@@ -479,12 +570,12 @@ async def graphrag_query(
             "latency_ms": int((time.monotonic() - t0) * 1000),
         }
 
-    reranked  = await rerank(question, all_context_nodes, top_n=top_k)
+    reranked  = await rerank(question, all_context_nodes, top_n=top_k, workspace=workspace)
     primary   = [n for n in reranked if "graph" not in n.get("retrieved_by", "")]
     graph_nbr = [n for n in reranked if "graph" in n.get("retrieved_by", "")]
 
     context   = _build_context(summaries_used, primary, graph_nbr)
-    answer    = await _generate(question, context, route, history)
+    answer    = await _generate(question, context, route, history, workspace=workspace)
     citations = _extract_citations(answer, reranked)
 
     return {

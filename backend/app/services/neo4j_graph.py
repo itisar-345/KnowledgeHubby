@@ -14,9 +14,8 @@ except ImportError:
     ServiceUnavailable = Exception  # type: ignore
     AuthError = Exception  # type: ignore
 
-# 384 for all-MiniLM-L6-v2 (local default); 1536 for text-embedding-3-small (OpenAI)
-import os as _os
-EMBEDDING_DIM: int = int(_os.getenv("EMBEDDING_DIM", "384"))
+# Dimension and provider signature sourced from the active EmbeddingProvider.
+from app.services.embeddings import EMBEDDING_DIM, EMBEDDING_PROVIDER_NAME
 
 
 class Neo4jGraphStore:
@@ -43,6 +42,8 @@ class Neo4jGraphStore:
         self.database = database or os.getenv("NEO4J_DATABASE", "neo4j")
         self.driver = None
         self._live = False
+        self._item_index = "knowledge_items_local_all_MiniLM_L6_v2"
+        self._summary_index = "artifact_summaries_local_all_MiniLM_L6_v2"
 
         if not GraphDatabase:
             logger.warning("neo4j driver package not installed — graph store disabled")
@@ -100,37 +101,51 @@ class Neo4jGraphStore:
     # ------------------------------------------------------------------
 
     def ensure_vector_index(self) -> None:
+        """
+        Create vector indexes named by provider signature so switching providers
+        never silently corrupts an existing index (Phase 2 requirement).
+        Index names: knowledge_items_{provider_sig}, artifact_summaries_{provider_sig}
+        """
         if not self.driver:
             return
+        sig = EMBEDDING_PROVIDER_NAME.replace(":", "_").replace("-", "_").replace(".", "_")
+        item_index = f"knowledge_items_{sig}"
+        summary_index = f"artifact_summaries_{sig}"
         try:
             with self.driver.session(database=self.database) as session:
                 session.run(
-                    """
-                    CREATE VECTOR INDEX knowledge_item_embeddings IF NOT EXISTS
+                    f"""
+                    CREATE VECTOR INDEX {item_index} IF NOT EXISTS
                     FOR (n:KnowledgeItem) ON n.embedding
-                    OPTIONS {
-                        indexConfig: {
+                    OPTIONS {{
+                        indexConfig: {{
                             `vector.dimensions`: $dim,
                             `vector.similarity_function`: 'cosine'
-                        }
-                    }
+                        }}
+                    }}
                     """,
                     dim=EMBEDDING_DIM,
                 )
                 session.run(
-                    """
-                    CREATE VECTOR INDEX artifact_summary_embeddings IF NOT EXISTS
+                    f"""
+                    CREATE VECTOR INDEX {summary_index} IF NOT EXISTS
                     FOR (n:Artifact) ON n.summary_embedding
-                    OPTIONS {
-                        indexConfig: {
+                    OPTIONS {{
+                        indexConfig: {{
                             `vector.dimensions`: $dim,
                             `vector.similarity_function`: 'cosine'
-                        }
-                    }
+                        }}
+                    }}
                     """,
                     dim=EMBEDDING_DIM,
                 )
-            logger.info("Neo4j vector indexes ensured (dim=%d)", EMBEDDING_DIM)
+            logger.info(
+                "Neo4j vector indexes ensured: %s, %s (dim=%d)",
+                item_index, summary_index, EMBEDDING_DIM,
+            )
+            # store active index names for retrieval queries
+            self._item_index = item_index
+            self._summary_index = summary_index
         except Exception as exc:
             logger.warning("Could not create vector index: %s", exc)
 
@@ -198,9 +213,9 @@ class Neo4jGraphStore:
         try:
             with self.driver.session(database=self.database) as session:
                 result = session.run(
-                    """
+                    f"""
                     CALL db.index.vector.queryNodes(
-                        'artifact_summary_embeddings', $top_k, $embedding
+                        '{self._summary_index}', $top_k, $embedding
                     )
                     YIELD node, score
                     RETURN node.id      AS artifact_id,
@@ -223,15 +238,15 @@ class Neo4jGraphStore:
     def vector_search(
         self, query_embedding: List[float], top_k: int = 8
     ) -> List[Dict[str, Any]]:
-        """Cosine-similarity ANN search over the vector index."""
+        """Cosine-similarity ANN search over the provider-versioned vector index."""
         if not self.driver:
             return []
         try:
             with self.driver.session(database=self.database) as session:
                 result = session.run(
-                    """
+                    f"""
                     CALL db.index.vector.queryNodes(
-                        'knowledge_item_embeddings', $top_k, $embedding
+                        '{self._item_index}', $top_k, $embedding
                     )
                     YIELD node, score
                     RETURN node.id          AS id,

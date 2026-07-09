@@ -34,6 +34,42 @@ export class AuthService {
     )
   }
 
+  async getWorkspaceSettings(): Promise<any> {
+    return await firstValueFrom(
+      this.http.get(`${API_BASE}/workspace/settings`, { headers: this.authHeaders() })
+    )
+  }
+
+  async updateWorkspaceSettings(body: any): Promise<any> {
+    return await firstValueFrom(
+      this.http.patch(`${API_BASE}/workspace/settings`, body, { headers: this.authHeaders() })
+    )
+  }
+
+  async listProviderConfigs(): Promise<any> {
+    return await firstValueFrom(
+      this.http.get(`${API_BASE}/workspace/provider-configs`, { headers: this.authHeaders() })
+    )
+  }
+
+  async createProviderConfig(body: any): Promise<any> {
+    return await firstValueFrom(
+      this.http.post(`${API_BASE}/workspace/provider-configs`, body, { headers: this.authHeaders() })
+    )
+  }
+
+  async updateProviderConfig(id: string, body: any): Promise<any> {
+    return await firstValueFrom(
+      this.http.put(`${API_BASE}/workspace/provider-configs/${id}`, body, { headers: this.authHeaders() })
+    )
+  }
+
+  async deleteProviderConfig(id: string): Promise<void> {
+    await firstValueFrom(
+      this.http.delete(`${API_BASE}/workspace/provider-configs/${id}`, { headers: this.authHeaders() })
+    )
+  }
+
   logout(): void {
     localStorage.removeItem('kh_token')
     this._token.set(null)

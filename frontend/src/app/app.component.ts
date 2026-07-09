@@ -16,6 +16,7 @@ import { AuthService } from './services/auth.service'
           <a routerLink="/search">Search</a>
           <a routerLink="/review">Review</a>
           <a routerLink="/graphrag">GraphRAG</a>
+          <a routerLink="/workspace-settings">Workspace</a>
           <button style="padding:0.25rem 0.75rem;font-size:0.875rem" (click)="logout()">Sign out</button>
         } @else {
           <a routerLink="/login">Sign in</a>

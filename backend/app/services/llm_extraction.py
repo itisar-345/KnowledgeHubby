@@ -1,40 +1,66 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict
 
 from app.services.item_schema import normalize_item_details
 from app.services import llm_client
 
-_SYSTEM_PROMPT = """You are a meeting analyst. Extract structured knowledge from the transcript.
-Return ONLY valid JSON with this exact shape:
+# Prompts are written to be explicit and unambiguous for local models
+# (llama3.1:8b class) which need more formatting guidance than GPT-4-class models.
+
+_EXTRACTION_SYSTEM = """\
+You are a meeting analyst. Extract structured knowledge from the transcript below.
+
+OUTPUT RULES — follow exactly:
+1. Return ONLY a single JSON object. No markdown, no code fences, no explanation.
+2. Use this exact shape:
 {
   "decisions": [{"what": "...", "why": "...", "who": "..."}],
   "action_items": [{"task": "...", "owner": "...", "due": "..."}],
   "risks": [{"risk": "...", "severity": "low|medium|high"}],
   "summary": "..."
 }
-Rules:
-- decisions: things that were agreed/decided
-- action_items: concrete tasks assigned to someone
-- risks: concerns or blockers mentioned
-- summary: 2-3 sentence summary of the meeting
-- Use "" for unknown fields, never null
-- Return ONLY the JSON object, no markdown fences"""
+3. decisions: things explicitly agreed or decided in the meeting.
+4. action_items: concrete tasks assigned to a person.
+5. risks: concerns, blockers, or uncertainties raised.
+6. summary: 2-3 sentences covering the main outcome.
+7. Use "" for any unknown field. Never use null.
+8. If nothing fits a category, use an empty array [].
+9. Do NOT wrap the JSON in ```json ... ``` or any other wrapper.\
+"""
+
+_SUMMARY_SYSTEM = """\
+Summarise the document below in 2-3 sentences.
+Return ONLY the summary text. No labels, no JSON, no markdown.\
+"""
 
 
-async def extract_from_transcript(text: str) -> Dict[str, Any]:
+def _extract_json(raw: str) -> Dict[str, Any]:
+    """
+    Parse JSON from LLM output, tolerating accidental markdown fences
+    that some local models emit despite instructions.
+    """
+    # strip ```json ... ``` or ``` ... ``` wrappers
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned.strip())
+    return json.loads(cleaned)
+
+
+async def extract_from_transcript(text: str, workspace: Optional[Any] = None) -> Dict[str, Any]:
     content = await llm_client.chat(
         messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": _EXTRACTION_SYSTEM},
             {"role": "user", "content": text[:12000]},
         ],
         temperature=0,
         json_mode=True,
+        workspace=workspace,
     )
     if content:
         try:
-            return _normalize_llm_result(json.loads(content))
+            return _normalize_llm_result(_extract_json(content))
         except Exception as exc:
             return {**_normalize_llm_result(_fallback(text)), "llm_error": str(exc)}
     return _fallback(text)
@@ -42,7 +68,6 @@ async def extract_from_transcript(text: str) -> Dict[str, Any]:
 
 def _fallback(text: str) -> Dict[str, Any]:
     """Regex fallback when no LLM is reachable."""
-    import re
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if len(s.strip()) > 10]
     decisions = [{"what": s, "why": "", "who": ""} for s in sentences
                  if any(k in s.lower() for k in ("decided", "agreed", "approved", "we will"))]
@@ -74,10 +99,10 @@ async def _summarise_text(text: str) -> str:
     """Return a 2-3 sentence condensed summary for the summary index."""
     content = await llm_client.chat(
         messages=[
-            {"role": "system", "content": "Summarise the following document in 2-3 sentences."},
+            {"role": "system", "content": _SUMMARY_SYSTEM},
             {"role": "user", "content": text[:8000]},
         ],
         temperature=0,
-        max_tokens=120,
+        max_tokens=150,
     )
     return content if content else text.strip()[:300]
