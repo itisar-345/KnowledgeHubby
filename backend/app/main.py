@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import platform
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -38,7 +40,7 @@ from app.services.curation_layer import CurationLayer
 from app.services.file_ingestion import extract_text_from_upload, fetch_url
 from app.services.graph_builder import GraphBuilder
 from app.services.graphrag import embed_items, graphrag_query, embed
-from app.services.providers import get_llm_provider, get_embedding_provider
+from app.services.providers import OLLAMA_BASE, get_llm_provider, get_embedding_provider
 from app.services.ingestion_normalization import IngestionNormalization
 from app.services.knowledge_extraction import KnowledgeExtraction
 from app.services.llm_extraction import extract_from_transcript
@@ -102,6 +104,41 @@ class ProviderConfigRequest(BaseModel):
     is_active: bool = True
 
 
+class ModelActionRequest(BaseModel):
+    model_id: str = Field(min_length=1, max_length=120)
+
+
+_RECOMMENDED_LOCAL_MODELS = {
+    "llama3.1:8b": {"name": "Llama 3.1 8B", "size": "4.7 GB", "ramRequired": "8 GB+"},
+    "mistral:7b": {"name": "Mistral 7B", "size": "4.1 GB", "ramRequired": "8 GB+"},
+    "llama3.1:70b": {"name": "Llama 3.1 70B", "size": "40 GB", "ramRequired": "64 GB+"},
+}
+
+
+async def _ollama_models() -> List[Dict[str, Any]]:
+    """Return local Ollama models without making Ollama a startup requirement."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"{OLLAMA_BASE}/api/tags")
+            response.raise_for_status()
+            return response.json().get("models", [])
+    except Exception:
+        return []
+
+
+def _system_ram_gb() -> int:
+    try:
+        import psutil
+        return max(1, round(psutil.virtual_memory().total / (1024 ** 3)))
+    except Exception:
+        # os.sysconf is available on Unix; use a safe useful fallback elsewhere.
+        try:
+            return max(1, round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024 ** 3)))
+        except Exception:
+            return 8
+
+
 async def _get_or_create_workspace(session: AsyncSession, workspace_id: str) -> Workspace:
     workspace = (await session.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
     if workspace:
@@ -139,6 +176,7 @@ async def register(
         username=body.username,
         hashed_password=hash_password(body.password),
         workspace_id=body.workspace_id,
+        role="admin",
     )
     session.add(user)
     await session.commit()
@@ -297,6 +335,179 @@ async def delete_provider_config(
     await session.delete(config)
     await session.commit()
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# API key storage  (encrypted at rest with Fernet / SECRET_KEY)
+# ---------------------------------------------------------------------------
+
+def _fernet() -> "Fernet":
+    """Derive a stable Fernet key from SECRET_KEY using PBKDF2."""
+    import base64
+    import hashlib
+    from cryptography.fernet import Fernet
+    # 32-byte key derived from SECRET_KEY — deterministic so existing
+    # ciphertext can always be decrypted as long as SECRET_KEY is unchanged.
+    raw = hashlib.pbkdf2_hmac(
+        "sha256",
+        SECRET_KEY.encode(),
+        b"knowledge-hubs-api-key-salt",
+        iterations=100_000,
+        dklen=32,
+    )
+    return Fernet(base64.urlsafe_b64encode(raw))
+
+
+class ApiKeyRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=40)   # e.g. "openai"
+    api_key: str  = Field(min_length=1, max_length=512)
+
+
+@app.post("/workspace/api-key", status_code=201)
+async def store_api_key(
+    body: ApiKeyRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, str]:
+    """
+    Encrypt the API key with Fernet (AES-128-CBC + HMAC-SHA256) and store
+    the ciphertext in ProviderConfig.config_json.  The plaintext key is
+    never written to disk or returned to the client.
+    Returns only the config_id as an opaque ref the frontend can store.
+    """
+    f = _fernet()
+    ciphertext = f.encrypt(body.api_key.encode()).decode()
+    provider_name = body.provider.strip().lower()
+
+    # Upsert: one active config per provider per workspace
+    existing = (await session.execute(
+        select(ProviderConfig).where(
+            ProviderConfig.workspace_id == current_user.workspace_id,
+            ProviderConfig.provider_type == "llm",
+            ProviderConfig.provider_name == provider_name,
+        )
+    )).scalar_one_or_none()
+
+    if existing:
+        existing.config_json = {"encrypted_key": ciphertext}
+        existing.api_key_ref = f"{provider_name}:configured"
+        existing.is_active = True
+        config_id = existing.id
+    else:
+        cfg = ProviderConfig(
+            workspace_id=current_user.workspace_id,
+            provider_type="llm",
+            provider_name=provider_name,
+            config_json={"encrypted_key": ciphertext},
+            api_key_ref=f"{provider_name}:configured",
+            is_active=True,
+            created_at=datetime.utcnow().isoformat(),
+        )
+        session.add(cfg)
+        await session.flush()   # populate cfg.id before commit
+        config_id = cfg.id
+
+    await session.commit()
+    return {"config_id": config_id, "provider": provider_name, "status": "stored"}
+
+
+# ---------------------------------------------------------------------------
+# Local model management (Ollama)
+# ---------------------------------------------------------------------------
+
+@app.get("/models/system-info")
+async def model_system_info(
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    ram_gb = _system_ram_gb()
+    tier = "llama3.1:70b" if ram_gb >= 64 else "llama3.1:8b" if ram_gb >= 8 else "mistral:7b"
+    return {"ramGb": ram_gb, "recommendedTier": tier, "platform": platform.system()}
+
+
+@app.get("/models/local")
+async def list_local_models(
+    current_user: User = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    installed = {m.get("name", ""): m for m in await _ollama_models()}
+    models: List[Dict[str, Any]] = []
+    for model_id, details in _RECOMMENDED_LOCAL_MODELS.items():
+        models.append({"id": model_id, **details, "provider": "ollama", "installed": model_id in installed})
+    for model_id, raw in installed.items():
+        if model_id not in _RECOMMENDED_LOCAL_MODELS:
+            models.append({"id": model_id, "name": model_id, "size": "Installed", "ramRequired": "Varies", "provider": "ollama", "installed": True})
+    return models
+
+
+@app.get("/models/status")
+async def model_status(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    workspace = await _get_workspace(session, current_user.workspace_id)
+    llm = get_llm_provider(workspace)
+    embedding = get_embedding_provider(workspace)
+    installed_names = {m.get("name", "") for m in await _ollama_models()}
+    return {
+        "llm": {"provider": "local" if llm.is_local else "cloud", "model": llm.name.split(":", 1)[-1], "installed": llm.name.split(":", 1)[-1] in installed_names},
+        "embedding": {"provider": "local" if embedding.is_local else "openai", "model": embedding.name.split(":", 1)[-1], "installed": True},
+        "cloudEnabled": bool(workspace.allow_cloud_providers),
+    }
+
+
+@app.post("/models/install")
+async def install_local_model(
+    body: ModelActionRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    if body.model_id not in _RECOMMENDED_LOCAL_MODELS:
+        raise HTTPException(status_code=400, detail="This model is not in the supported local model list")
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=900) as client:
+            response = await client.post(f"{OLLAMA_BASE}/api/pull", json={"name": body.model_id, "stream": False})
+            response.raise_for_status()
+        return {"model_id": body.model_id, "installed": True}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not install the local model. Ensure Ollama is running: {exc}")
+
+
+@app.post("/models/remove")
+async def remove_local_model(
+    body: ModelActionRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.request("DELETE", f"{OLLAMA_BASE}/api/delete", json={"name": body.model_id})
+            response.raise_for_status()
+        return {"model_id": body.model_id, "removed": True}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Could not remove the local model: {exc}")
+
+
+@app.post("/models/set-default")
+async def set_default_local_model(
+    body: ModelActionRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    installed = {m.get("name", "") for m in await _ollama_models()}
+    if body.model_id not in installed:
+        raise HTTPException(status_code=400, detail="Install this model before making it the default")
+    workspace = await _get_workspace(session, current_user.workspace_id)
+    config = (await session.execute(select(ProviderConfig).where(
+        ProviderConfig.workspace_id == workspace.id,
+        ProviderConfig.provider_type == "llm",
+        ProviderConfig.provider_name == "ollama",
+    ))).scalar_one_or_none()
+    if config:
+        config.model_name = body.model_id
+        config.is_active = True
+    else:
+        session.add(ProviderConfig(workspace_id=workspace.id, provider_type="llm", provider_name="ollama", model_name=body.model_id, created_at=datetime.utcnow().isoformat()))
+    await session.commit()
+    return {"model_id": body.model_id, "default": True}
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +1148,7 @@ async def ingest_transcript(
             title=request.title, content=request.content,
             source=request.source_type, source_type=request.source_type,
             author=request.author, tags=request.tags,
+            extraction_engine="local_llm" if not llm_result.get("llm_error") else "regex",
             created_at=created_at, metadata_=metadata,
         ))
     else:
@@ -954,12 +1166,13 @@ async def ingest_transcript(
         ki = await session.get(KnowledgeItem, item["id"])
         if ki:
             ki.title = item["title"]; ki.details = item["details"]
+            ki.extraction_engine = "local_llm" if not llm_result.get("llm_error") else "regex"
         else:
             session.add(KnowledgeItem(
                 id=item["id"], workspace_id=current_user.workspace_id,
                 artifact_id=artifact_id, title=item["title"], type=item["type"],
                 author=item["author"], date=item["date"], tags=item["tags"],
-                details=item["details"], review_status="pending",
+                details=item["details"], extraction_engine="local_llm" if not llm_result.get("llm_error") else "regex", review_status="pending",
             ))
 
     relationships = [{"from": artifact_id, "to": i["id"], "type": "CONTAINS"} for i in items]
@@ -978,8 +1191,8 @@ async def ingest_transcript(
 
     await session.commit()
     neo4j_graph.upsert_artifact_graph(artifact_dict, items, relationships)
-    await _embed_and_store(items, session, workspace=current_user)
-    await _build_artifact_summary(session, current_user.workspace_id, artifact_dict, request.content, workspace=current_user)
+    await _embed_and_store(items, session, workspace=workspace)
+    await _build_artifact_summary(session, current_user.workspace_id, artifact_dict, request.content, workspace=workspace)
 
     return {
         "artifact": artifact_dict,
@@ -1052,6 +1265,7 @@ async def graphrag_query_endpoint(
     workspace = await _get_workspace(session, ws)
     session.add(QueryLog(
         workspace_id=ws,
+        user_id=current_user.id,
         question=request.question,
         sub_queries=result.get("sub_queries", []),
         hyde_doc=result.get("hyde_doc"),
@@ -1332,6 +1546,26 @@ async def delete_artifact(
             await session.delete(row)
     await session.delete(artifact)
     await session.commit()
+    # Mirror deletion in Neo4j.  A graph failure must not silently leave
+    # SQLite cleaned but the graph intact — log it and let /health/consistency
+    # surface any residual drift, but at least stop generating new drift.
+    neo4j_error: str | None = None
+    if neo4j_graph.enabled:
+        try:
+            neo4j_graph.delete_artifact_graph(artifact_id)
+        except Exception as exc:
+            neo4j_error = str(exc)
+            logger.error(
+                "Neo4j delete_artifact_graph(%s) failed after SQLite commit: %s",
+                artifact_id, exc,
+            )
+    if neo4j_error:
+        # 207 signals partial success: SQLite is clean, graph may have drift.
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=207,
+            content={"detail": "Artifact deleted from SQLite but Neo4j cleanup failed", "neo4j_error": neo4j_error},
+        )
     return Response(status_code=204)
 
 
@@ -1384,6 +1618,22 @@ async def delete_item(
         await session.delete(rel)
     await session.delete(item)
     await session.commit()
+    neo4j_error: str | None = None
+    if neo4j_graph.enabled:
+        try:
+            neo4j_graph.delete_item(item_id)
+        except Exception as exc:
+            neo4j_error = str(exc)
+            logger.error(
+                "Neo4j delete_item(%s) failed after SQLite commit: %s",
+                item_id, exc,
+            )
+    if neo4j_error:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=207,
+            content={"detail": "Item deleted from SQLite but Neo4j cleanup failed", "neo4j_error": neo4j_error},
+        )
     return Response(status_code=204)
 
 
@@ -1425,6 +1675,7 @@ def _artifact_dict(a: Artifact) -> Dict[str, Any]:
         "source_type": a.source_type or "manual",
         "author": a.author,
         "tags": a.tags or [],
+        "extraction_engine": a.extraction_engine or "regex",
         "created_at": a.created_at,
         "metadata": a.metadata_ or {},
     }
@@ -1440,6 +1691,7 @@ def _item_dict(i: KnowledgeItem) -> Dict[str, Any]:
         "date": i.date,
         "tags": i.tags or [],
         "details": i.details or {},
+        "extraction_engine": i.extraction_engine or "regex",
         "review_status": i.review_status,
         "review_note": i.review_note or "",
     }

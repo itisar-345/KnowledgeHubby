@@ -58,6 +58,22 @@ type RelatedItem = { item: KnowledgeItem; score: number }
           </div>
         </section>
 
+        <!-- Edit form — shown inline below the hero when editing -->
+        <section *ngIf="editing" class="detail-panel">
+          <h3>Edit Item</h3>
+          <div class="detail-edit-grid">
+            <div class="form-row">
+              <label>Tags <span class="muted-text">(comma-separated)</span></label>
+              <input [(ngModel)]="editedTagsRaw" placeholder="tag1, tag2" />
+            </div>
+            <div class="form-row">
+              <label>Details <span class="muted-text">(JSON)</span></label>
+              <textarea [(ngModel)]="editedDetailsRaw" rows="6" style="font-family:monospace;font-size:0.8rem"></textarea>
+              <span *ngIf="detailsParseError" class="error-text">{{ detailsParseError }}</span>
+            </div>
+          </div>
+        </section>
+
         <div class="detail-grid">
           <section class="detail-panel">
             <h3>Extracted Details</h3>
@@ -126,12 +142,28 @@ type RelatedItem = { item: KnowledgeItem; score: number }
         </section>
       </ng-container>
     </div>
-  `
+  `,
+  styles: [`
+    .detail-edit-grid { display: flex; flex-direction: column; gap: 1rem; }
+    .form-row { display: flex; flex-direction: column; gap: 0.35rem; }
+    .form-row label { font-size: 0.85rem; font-weight: 600; color: #344054; }
+    .form-row input, .form-row textarea {
+      border: 1px solid #ddd; border-radius: 6px;
+      font-family: inherit; font-size: 0.875rem; padding: 0.6rem 0.75rem;
+    }
+    .form-row input:focus, .form-row textarea:focus {
+      outline: none; border-color: #0066cc;
+      box-shadow: 0 0 0 3px rgba(0,102,204,0.1);
+    }
+  `]
 })
 export class KnowledgeDetailComponent implements OnInit {
   data: any = null; error = ''; id = ''
   editing = false; saving = false; deleting = false; crudError = ''
   editedTitle = ''
+  editedTagsRaw = ''
+  editedDetailsRaw = ''
+  detailsParseError = ''
   private crossLinks: CrossLink[] = []
 
   get item(): KnowledgeItem | undefined {
@@ -180,18 +212,33 @@ export class KnowledgeDetailComponent implements OnInit {
   }
 
   startEdit() {
-    this.editedTitle = this.item?.title || ''
-    this.editing = true
+    const item = this.item
+    if (!item) return
+    this.editedTitle = item.title
+    this.editedTagsRaw = (item.tags || []).join(', ')
+    this.editedDetailsRaw = JSON.stringify(item.details || {}, null, 2)
+    this.detailsParseError = ''
     this.crudError = ''
+    this.editing = true
   }
 
   async saveItem() {
     if (!this.item) return
+    // Validate details JSON before sending
+    let parsedDetails: Record<string, unknown>
+    try {
+      parsedDetails = JSON.parse(this.editedDetailsRaw || '{}')
+    } catch {
+      this.detailsParseError = 'Details must be valid JSON'
+      return
+    }
+    this.detailsParseError = ''
     this.saving = true; this.crudError = ''
     try {
+      const tags = this.editedTagsRaw.split(',').map(t => t.trim()).filter(Boolean)
       await firstValueFrom(this.http.put(
         `${API_BASE}/knowledge/items/${this.id}`,
-        { title: this.editedTitle },
+        { title: this.editedTitle, tags, details: parsedDetails },
         { headers: this.auth.authHeaders() }
       ))
       this.editing = false

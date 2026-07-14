@@ -6,7 +6,7 @@ Public API is unchanged: callers import `embed`, `embed_batch`, and
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from app.services.providers import get_embedding_provider
 

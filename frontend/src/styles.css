@@ -384,6 +384,14 @@ textarea:focus {
   padding: 0.25rem 0.45rem;
 }
 
+.engine-badge {
+  background: #f2f4f7;
+  border-radius: 999px;
+  color: #475467;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.45rem;
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;
@@ -914,4 +922,19 @@ textarea:focus {
   font-size: 0.9rem;
   line-height: 1.55;
   padding: 0.85rem 1rem;
+}
+
+.provider-hint {
+  color: #667085;
+  font-size: 0.8rem;
+  margin-top: -0.25rem;
+}
+
+.engine-local  { background: #e6f7e6; color: #1a6b1a; }
+.engine-cloud  { background: #e6f0ff; color: #0033cc; }
+.engine-regex  { background: #f2f4f7; color: #475467; }
+
+.error-text {
+  color: #b42318;
+  font-size: 0.875rem;
 }

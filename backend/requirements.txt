@@ -4,6 +4,7 @@ pydantic==2.5.0
 neo4j==5.28.1
 python-multipart==0.0.9
 python-jose[cryptography]==3.3.0
+cryptography==42.0.8
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 SQLAlchemy==2.0.23
@@ -12,6 +13,7 @@ aiofiles==23.2.1
 PyPDF2==3.0.1
 httpx==0.25.2
 numpy==1.26.4
+psutil==5.9.8
 
 # Local-first embedding (default)
 sentence-transformers==2.7.0

@@ -14,6 +14,16 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Prevent sentence-transformers / HuggingFace from phoning home to
+# huggingface.co on every cold start to check for model updates.
+# The model is cached locally after first download; this enforces offline
+# operation and is required for the local-first / airplane-mode guarantee.
+# Set before any HF library is imported so the flag is always respected.
+if not os.getenv("TRANSFORMERS_OFFLINE"):
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+if not os.getenv("HF_DATASETS_OFFLINE"):
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+
 # ── env ───────────────────────────────────────────────────────────────────────
 LLM_PROVIDER       = os.getenv("LLM_PROVIDER", "ollama").lower()
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
@@ -54,13 +64,16 @@ class LLMProvider(ABC):
 class OllamaProvider(LLMProvider):
     """Default local LLM via Ollama HTTP API."""
 
+    def __init__(self, model: Optional[str] = None):
+        self.model = model or OLLAMA_MODEL
+
     @property
     def is_local(self) -> bool:
         return True
 
     @property
     def name(self) -> str:
-        return f"ollama:{OLLAMA_MODEL}"
+        return f"ollama:{self.model}"
 
     async def chat(
         self,
@@ -72,7 +85,7 @@ class OllamaProvider(LLMProvider):
         try:
             import httpx
             payload: dict[str, Any] = {
-                "model": OLLAMA_MODEL,
+                "model": self.model,
                 "messages": messages,
                 "stream": False,
                 "options": {"temperature": temperature, "num_predict": max_tokens},
@@ -229,9 +242,14 @@ def _workspace_allows_cloud(workspace: Optional[Any]) -> bool:
 
 
 def _resolve_llm(workspace: Optional[Any] = None) -> LLMProvider:
+    configured_model = None
+    # A workspace's active Ollama config can override the process default.
+    # The database object is intentionally not queried here; callers pass the
+    # selected config as an attribute when available.
+    configured_model = getattr(workspace, "ollama_model", None) if workspace is not None else None
     if not _workspace_allows_cloud(workspace):
         logger.info("Cloud providers disabled by admin kill-switch or workspace policy; using Ollama local provider")
-        return OllamaProvider()
+        return OllamaProvider(configured_model)
 
     provider_name = _normalize_provider(
         getattr(workspace, "default_llm_provider", None) or LLM_PROVIDER,
@@ -242,7 +260,7 @@ def _resolve_llm(workspace: Optional[Any] = None) -> LLMProvider:
         return OpenAILLMProvider()
 
     logger.info("LLM provider: Ollama (%s)", OLLAMA_MODEL)
-    return OllamaProvider()
+    return OllamaProvider(configured_model)
 
 
 def _resolve_embedding(workspace: Optional[Any] = None) -> EmbeddingProvider:

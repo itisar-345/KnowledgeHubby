@@ -6,7 +6,7 @@ Provider selection (Ollama default / OpenAI optional) is handled in providers.py
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.services.providers import get_llm_provider
 

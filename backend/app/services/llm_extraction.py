@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.services.item_schema import normalize_item_details
 from app.services import llm_client
@@ -63,7 +63,7 @@ async def extract_from_transcript(text: str, workspace: Optional[Any] = None) ->
             return _normalize_llm_result(_extract_json(content))
         except Exception as exc:
             return {**_normalize_llm_result(_fallback(text)), "llm_error": str(exc)}
-    return _fallback(text)
+    return {**_fallback(text), "llm_error": "no LLM reachable – regex fallback used"}
 
 
 def _fallback(text: str) -> Dict[str, Any]:
@@ -95,7 +95,7 @@ def _normalize_llm_result(result: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-async def _summarise_text(text: str) -> str:
+async def _summarise_text(text: str, workspace: Optional[Any] = None) -> str:
     """Return a 2-3 sentence condensed summary for the summary index."""
     content = await llm_client.chat(
         messages=[
@@ -104,5 +104,6 @@ async def _summarise_text(text: str) -> str:
         ],
         temperature=0,
         max_tokens=150,
+        workspace=workspace,
     )
     return content if content else text.strip()[:300]

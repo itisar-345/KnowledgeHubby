@@ -60,11 +60,13 @@ Knowledge Hubs
 |   +-- src/app/
 |       +-- pages/
 |       |   +-- knowledge/         Hub — ingest, browse, graph, artifact CRUD
-|       |   +-- knowledge-detail/  Item detail — edit, delete, relationships
+|       |   +-- knowledge-detail/  Item detail — edit (title, tags, details), delete, relationships
 |       |   +-- search/            Full-text + filter search
 |       |   +-- review/            Pending item review queue
-|       |   +-- graphrag/          GraphRAG chat interface
+|       |   +-- graphrag/          GraphRAG chat interface with conversation history
 |       |   +-- workspace-settings/ Workspace + provider policy settings
+|       |   +-- model-manager/     Local model install, remove, set-default
+|       |   +-- onboarding/        First-run setup wizard
 |       |   +-- login/             Authentication
 |       +-- services/
 |           +-- auth.service.ts    JWT auth + API base
@@ -230,6 +232,24 @@ The frontend runs on `http://localhost:3000` and the backend runs on `http://loc
 | `POST` | `/workspace/provider-configs` | Create a new provider configuration for the workspace |
 | `PUT` | `/workspace/provider-configs/{config_id}` | Update an existing workspace provider configuration |
 | `DELETE` | `/workspace/provider-configs/{config_id}` | Delete a workspace provider configuration |
+| `POST` | `/workspace/api-key` | Store a provider API key encrypted at rest (Fernet/AES-128); returns `config_id` only — plaintext never persisted |
+
+### Re-embedding
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/knowledge/reembed` | Re-embed all knowledge items and artifact summaries under the current embedding provider; run after switching providers |
+
+### Local Model Management
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/models/system-info` | Detect RAM and recommend a local model tier |
+| `GET` | `/models/local` | List recommended and installed Ollama models |
+| `GET` | `/models/status` | Active LLM and embedding provider status |
+| `POST` | `/models/install` | Pull a supported model via Ollama |
+| `POST` | `/models/remove` | Delete a local model via Ollama |
+| `POST` | `/models/set-default` | Set an installed model as the workspace default |
 
 ## Data Model
 
@@ -248,11 +268,13 @@ The default persistence layer is Neo4j, which supports rich relationship travers
 | Route | Description |
 |-------|-------------|
 | `/knowledge` | Main hub — ingest artifacts, browse extracted items, manage artifacts (edit/delete), interactive knowledge graph |
-| `/knowledge/:id` | Item detail — view extracted fields, source artifact, relationships, cross-links; edit title or delete item |
+| `/knowledge/:id` | Item detail — view extracted fields, source artifact, relationships, cross-links; edit title, tags, and details or delete item |
 | `/search` | Full-text and filtered search across items and artifacts with shareable URLs |
 | `/review` | Review queue for pending knowledge items — accept, reject, or edit before promoting |
 | `/graphrag` | GraphRAG chat — ask questions over the knowledge base, see context nodes and retrieval mode |
-| `/workspace-settings` | Workspace/provider settings — manage default LLM, embedding, and cloud access policies |
+| `/workspace-settings` | Workspace/provider settings — manage default LLM, embedding, and cloud access policies; inline edit provider configs; auto-triggers re-embed on embedding provider change |
+| `/settings/models` | Model manager — install, remove, and set default local Ollama models |
+| `/onboarding` | First-run wizard — hardware detection, model install, optional cloud API key, user registration |
 | `/login` | Authentication |
 
 ## Interactive Graph
@@ -270,8 +292,13 @@ The knowledge graph on the hub page supports:
 - **Local-first by default**: embeddings use `sentence-transformers` (all-MiniLM-L6-v2, dim=384) and LLM calls go to Ollama. No external API key is required for any feature.
 - **Cloud as opt-in**: set `EMBEDDING_PROVIDER=openai` and/or `LLM_PROVIDER=openai` with `OPENAI_API_KEY` to upgrade individual layers independently.
 - **Embedding dimension**: the Neo4j vector index is created with `EMBEDDING_DIM` (default 384). If you switch to OpenAI embeddings, set `EMBEDDING_DIM=1536` and recreate the index.
+- **Provider switch → auto re-embed**: changing the embedding provider in workspace settings automatically triggers `POST /knowledge/reembed`, which re-vectorizes all items and artifact summaries under the new provider and rebuilds the Neo4j vector index.
+- **API key encryption**: `POST /workspace/api-key` derives a Fernet key from `SECRET_KEY` via PBKDF2 (100k iterations) and stores only the ciphertext in `ProviderConfig.config_json`. The plaintext key is never written to disk or returned to the client.
+- **JWT expiry**: tokens expire after 8 hours. The frontend decodes the `exp` claim on every route navigation and redirects to `/login` (calling `auth.logout()`) if the token is stale.
+- **Neo4j partial-delete (207)**: artifact and item delete handlers commit to SQLite first, then attempt Neo4j cleanup. If Neo4j fails, the handler returns HTTP 207 with a `neo4j_error` field and logs at ERROR level. Use `GET /health/consistency` to surface any residual drift.
 - **CORS**: backend allows `localhost:3000`, `localhost:4200`, and their `127.0.0.1` equivalents.
 - **Deterministic IDs**: artifact and item IDs are stable SHA-256 hashes of their content, so re-ingesting the same document is idempotent.
 - **Dual-store writes**: every embedding is written to both SQLite (always available) and Neo4j (when connected), so vector search degrades gracefully rather than failing.
 - **Docker**: Neo4j runs as the primary store; `backend/data` is mounted for SQLite persistence across container rebuilds.
 - **SQLite fallback**: set `STORAGE_BACKEND=sqlite` to bypass Neo4j entirely without code changes.
+- **OKF import/export**: API endpoints (`POST /knowledge/okf/import`, `GET /knowledge/okf/export`) are fully implemented. A frontend UI for file-based transfer is a planned Should-Have (useful for air-gapped workspace migration).

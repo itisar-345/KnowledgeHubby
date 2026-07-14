@@ -33,6 +33,7 @@ class User(Base):
     username = Column(String, unique=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     workspace_id = Column(String, nullable=False)
+    role = Column(String, default="member")
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ class QueryLog(Base):
     __tablename__ = "query_logs"
     id = Column(String, primary_key=True, default=_uuid)
     workspace_id = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=True)
     question = Column(Text, nullable=False)
     sub_queries = Column(JSON, default=list)
     hyde_doc = Column(Text, nullable=True)
@@ -190,6 +192,8 @@ _MIGRATIONS = [
     "ALTER TABLE knowledge_items ADD COLUMN extraction_engine TEXT",
     "ALTER TABLE artifact_summaries ADD COLUMN embedding_provider TEXT",
     "ALTER TABLE artifact_summaries ADD COLUMN embedding_dims INTEGER",
+    "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'member'",
+    "ALTER TABLE query_logs ADD COLUMN user_id TEXT",
 ]
 
 

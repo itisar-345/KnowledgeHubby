@@ -6,7 +6,7 @@ import { HttpClient } from '@angular/common/http'
 import { firstValueFrom } from 'rxjs'
 import { AuthService, API_BASE } from '../../services/auth.service'
 
-type ReviewItem = { id: string; title: string; type: string; author: string; date: string; tags: string[]; details: Record<string, unknown>; review_status: string; review_note: string }
+type ReviewItem = { id: string; title: string; type: string; author: string; date: string; tags: string[]; details: Record<string, unknown>; review_status: string; review_note: string; extraction_engine?: string }
 
 @Component({
   selector: 'app-review',
@@ -36,6 +36,7 @@ type ReviewItem = { id: string; title: string; type: string; author: string; dat
           <div class="review-card">
             <div class="card-topline">
               <span class="type-pill">{{ item.type }}</span>
+              <span class="engine-badge" [ngClass]="engineClass(item.extraction_engine)">{{ engineLabel(item.extraction_engine) }}</span>
               <span class="muted-text">{{ item.date | date }}</span>
             </div>
             @if (editingId === item.id) {
@@ -77,6 +78,14 @@ export class ReviewComponent implements OnInit {
   }
 
   startEdit(item: ReviewItem) { this.editingId = item.id; this.editTitle = item.title; this.editNote = '' }
+
+  engineLabel(engine?: string) {
+    return engine === 'cloud_llm' ? 'Cloud LLM' : engine === 'local_llm' ? 'Local LLM' : 'Regex'
+  }
+
+  engineClass(engine?: string) {
+    return engine === 'cloud_llm' ? 'engine-cloud' : engine === 'local_llm' ? 'engine-local' : 'engine-regex'
+  }
 
   async decide(id: string, status: 'accepted' | 'rejected', title?: string, note?: string) {
     this.loading = true

@@ -104,6 +104,7 @@ type Transform = { x: number; y: number; k: number }
           </div>
           <textarea [(ngModel)]="txContent" placeholder="Paste your meeting transcript, email thread, or Slack conversation…" rows="10"></textarea>
           <div *ngIf="txSummary" class="summary-box"><strong>AI Summary:</strong> {{ txSummary }}</div>
+          <p class="provider-hint">ⓘ Transcript mode uses your local model — no data leaves this device</p>
           <div class="panel-actions">
             <span *ngIf="error" class="error-text">{{ error }}</span>
             <button class="primary" [disabled]="loading || !txTitle || !txContent" (click)="ingestTranscript()">

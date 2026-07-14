@@ -372,6 +372,42 @@ class Neo4jGraphStore:
         return combined
 
     # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    def delete_artifact_graph(self, artifact_id: str) -> None:
+        """
+        DETACH DELETE the Artifact node and all KnowledgeItem nodes that
+        belong to it.  Relationships are removed automatically by Neo4j.
+        Raises on failure so the caller can decide whether to surface the
+        error — do NOT silently swallow here.
+        """
+        if not self.driver:
+            return
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                """
+                MATCH (a:Artifact {id: $id})
+                OPTIONAL MATCH (a)-[:CONTAINS]->(n:KnowledgeItem)
+                DETACH DELETE a, n
+                """,
+                id=artifact_id,
+            )
+
+    def delete_item(self, item_id: str) -> None:
+        """
+        DETACH DELETE a single KnowledgeItem node.
+        Raises on failure so the caller can decide whether to surface the error.
+        """
+        if not self.driver:
+            return
+        with self.driver.session(database=self.database) as session:
+            session.run(
+                "MATCH (n:KnowledgeItem {id: $id}) DETACH DELETE n",
+                id=item_id,
+            )
+
+    # ------------------------------------------------------------------
     # Visualization
     # ------------------------------------------------------------------
 
