@@ -121,6 +121,8 @@ export class SearchComponent implements OnInit {
       if (this.sourceFilter) apiQp['source_type'] = this.sourceFilter; if (this.tagFilter) apiQp['tag'] = this.tagFilter
       const params = new URLSearchParams(apiQp).toString()
       this.result = await firstValueFrom(this.http.get<SearchResult>(`${API_BASE}/knowledge/search${params ? '?' + params : ''}`, { headers: this.auth.authHeaders() }))
+    } catch (e: any) {
+      console.error('search error:', e)
     } finally { this.loading = false }
   }
 

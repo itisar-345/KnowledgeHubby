@@ -1,213 +1,130 @@
 import { Component } from '@angular/core'
-import { CommonModule } from '@angular/common'
 import { RouterLink } from '@angular/router'
 
 @Component({
   selector: 'app-privacy-policy',
   standalone: true,
-  imports: [CommonModule, RouterLink],
+  imports: [RouterLink],
   template: `
-    <div class="privacy-container">
+    <div class="privacy-shell">
       <div class="privacy-content">
-        <div class="privacy-header">
-          <a routerLink="/knowledge" class="back-link">← Back</a>
-          <h1>Data Privacy & What Leaves Your Device</h1>
+        <a routerLink="/knowledge" class="back-link">← Back to hub</a>
+        <h1>Data Privacy &amp; What Leaves Your Device</h1>
+        <p class="lead">Knowledge Hubs is local-first. Nothing leaves your machine unless you explicitly enable a cloud provider.</p>
+
+        <div class="card">
+          <h2>🟢 Local Mode (Default)</h2>
+          <p>All processing runs on your machine using <strong>sentence-transformers</strong> for embeddings and <strong>Ollama</strong> for LLM inference.</p>
+          <ul>
+            <li>Text you ingest is stored only in your local SQLite database and Neo4j instance</li>
+            <li>Embeddings are computed locally — no vectors are sent externally</li>
+            <li>GraphRAG queries, extraction, and summarisation all run on-device</li>
+            <li>The provider badge shows <strong>🟢 Local</strong> on every AI-powered screen</li>
+          </ul>
+          <div class="highlight">✓ In local mode, zero bytes of your content leave this device.</div>
         </div>
 
-        <section class="privacy-section">
-          <h2>Local-First Architecture</h2>
-          <p>
-            Knowledge Hubs is designed with <strong>privacy as the default</strong>. All processing happens on your machine by default — nothing leaves your device unless you explicitly enable cloud providers.
-          </p>
-        </section>
-
-        <section class="privacy-section">
-          <h2>Local Mode (Default)</h2>
-          <p>When using local models:</p>
+        <div class="card">
+          <h2>🔵 Cloud Mode (Opt-in)</h2>
+          <p>You can optionally switch to OpenAI for embeddings and/or LLM generation in Workspace Settings.</p>
           <ul>
-            <li>Text you ingest never leaves your machine</li>
-            <li>AI processing (extraction, linking, embedding) runs locally</li>
-            <li>The knowledge graph is stored locally</li>
-            <li>Search and context retrieval are entirely local</li>
+            <li>Cloud providers are disabled by default — <code>ALLOW_CLOUD_PROVIDERS=false</code></li>
+            <li>Enabling cloud sends your text to OpenAI's API under their <a href="https://openai.com/policies/privacy-policy" target="_blank" rel="noopener">privacy policy</a></li>
+            <li>The provider badge switches to <strong>🔵 Cloud</strong> so you always know when data is leaving</li>
+            <li>API keys are encrypted at rest using Fernet/AES-128 — the plaintext key is never stored on disk</li>
           </ul>
-          <p class="highlight">✓ <strong>Nothing leaves your device.</strong></p>
-        </section>
+          <div class="warning">⚠ Review your cloud provider's data retention and training policies before enabling.</div>
+        </div>
 
-        <section class="privacy-section">
-          <h2>Cloud Mode (Optional)</h2>
-          <p>If you enable cloud providers:</p>
+        <div class="card">
+          <h2>🗄 What Is Stored Locally</h2>
           <ul>
-            <li>You explicitly configure which cloud services to use (e.g., OpenAI)</li>
-            <li>Cloud processing is opt-in per workspace, not automatic</li>
-            <li>Only the data you explicitly send to cloud APIs leaves your device</li>
-            <li>Text, code, and sensitive information should be carefully reviewed before sending to cloud</li>
+            <li><strong>SQLite</strong> — artifacts, knowledge items, embeddings, relationships, query logs</li>
+            <li><strong>Neo4j</strong> (when running) — graph nodes, edges, and vector index</li>
+            <li><strong>Browser localStorage</strong> — JWT auth token and workspace ID only</li>
+            <li><strong>sessionStorage</strong> — GraphRAG chat history (cleared when the tab closes)</li>
           </ul>
-          <p class="warning">⚠ <strong>Your cloud provider's terms of service apply.</strong> Review their privacy policies.</p>
-        </section>
+        </div>
 
-        <section class="privacy-section">
-          <h2>Data Storage</h2>
+        <div class="card">
+          <h2>🔑 Authentication</h2>
           <ul>
-            <li><strong>Authentication token:</strong> Stored in browser localStorage for session management</li>
-            <li><strong>Workspace settings:</strong> Stored on the server (encrypted in transit)</li>
-            <li><strong>Knowledge graph & embeddings:</strong> Stored locally on your machine</li>
-            <li><strong>Ingested content:</strong> Never sent to external services unless cloud mode is enabled</li>
+            <li>Passwords are hashed with bcrypt — never stored in plaintext</li>
+            <li>JWT tokens expire after 8 hours and are validated on every route navigation</li>
+            <li>Tokens are stored in <code>localStorage</code> and cleared on logout or expiry</li>
           </ul>
-        </section>
+        </div>
 
-        <section class="privacy-section">
-          <h2>Model Downloads</h2>
-          <p>
-            When you download local models (e.g., Llama 3.1):
-          </p>
+        <div class="card">
+          <h2>📦 Model Downloads</h2>
           <ul>
-            <li>Models are fetched from Ollama or similar registries</li>
-            <li>No user data is sent during model download — only the model binary itself</li>
-            <li>Downloaded models are stored on your machine</li>
+            <li>Models are pulled from the Ollama registry — only the model binary is downloaded</li>
+            <li>No user content is sent during model download</li>
+            <li>Models are stored on your machine and run entirely offline after download</li>
           </ul>
-        </section>
+        </div>
 
-        <section class="privacy-section">
-          <h2>Browser Data</h2>
-          <p>
-            This web application stores in your browser:
-          </p>
+        <div class="card">
+          <h2>🛡 Your Rights</h2>
           <ul>
-            <li>Authentication token (localStorage)</li>
-            <li>Workspace ID (localStorage)</li>
-            <li>UI preferences (localStorage)</li>
+            <li>You own all data you ingest — delete any artifact or item at any time via the UI or API</li>
+            <li>Full workspace export is available via <code>GET /knowledge/okf/export</code></li>
+            <li>No analytics, telemetry, or third-party tracking are included in this application</li>
           </ul>
-          <p>No third-party tracking or analytics are enabled by default.</p>
-        </section>
+        </div>
 
-        <section class="privacy-section">
-          <h2>Transparency Promise</h2>
-          <div class="promise-box">
-            <p>
-              <strong>Every AI-touched surface in the UI shows which provider is in use.</strong>
-            </p>
-            <p>
-              Look for the badge at the top of your screen:
-            </p>
-            <ul>
-              <li>🟢 <strong>Green "Local"</strong> — processing is happening on your machine</li>
-              <li>🔵 <strong>Blue "Cloud"</strong> — data is being sent to a cloud service</li>
-            </ul>
-            <p>
-              This makes it impossible to accidentally use cloud AI without realizing it.
-            </p>
-          </div>
-        </section>
-
-        <section class="privacy-section">
-          <h2>GDPR & Data Rights</h2>
-          <p>
-            Since all user data is stored on your device by default:
-          </p>
-          <ul>
-            <li>You have full control and ownership of your data</li>
-            <li>You can delete all data by removing the application</li>
-            <li>No tracking or profiling happens on local data</li>
-            <li>Cloud providers (if used) are subject to their own privacy policies</li>
-          </ul>
-        </section>
-
-        <section class="privacy-section last-section">
-          <h2>Questions?</h2>
-          <p>
-            If you have questions about how your data is handled, please refer to the documentation or contact support.
-          </p>
-        </section>
+        <p class="footer-note">
+          For questions about data handling, refer to the
+          <a href="https://aws.amazon.com/compliance/data-privacy-faq/" target="_blank" rel="noopener">AWS Data Privacy FAQ</a>.
+        </p>
       </div>
     </div>
   `,
   styles: [`
-    .privacy-container {
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 2rem;
-    }
-
-    .privacy-header {
-      margin-bottom: 3rem;
-    }
-
+    .privacy-shell { max-width: 760px; margin: 0 auto; padding: 2rem; }
     .back-link {
-      display: inline-block;
-      color: #0066cc;
-      text-decoration: none;
+      display: inline-block; color: #667eea; text-decoration: none;
+      font-weight: 500; font-size: 0.875rem; margin-bottom: 1.25rem;
+    }
+    .back-link:hover { text-decoration: underline; }
+
+    h1 { font-size: 1.6rem; color: #1f2933; margin-bottom: 0.5rem; }
+    .lead { color: #667085; font-size: 0.95rem; margin-bottom: 1.75rem; line-height: 1.6; }
+
+    .card {
+      background: rgba(255,255,255,0.97);
+      border: 1px solid #e5ecea;
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
       margin-bottom: 1rem;
-      font-weight: 500;
+      box-shadow: 0 2px 8px rgba(102,126,234,0.06);
     }
-
-    .back-link:hover {
-      text-decoration: underline;
-    }
-
-    h1 {
-      font-size: 2rem;
-      margin: 0;
-      color: #333;
-    }
-
-    .privacy-section {
-      margin-bottom: 2rem;
-      padding-bottom: 2rem;
-      border-bottom: 1px solid #e0e0e0;
-    }
-
-    .privacy-section.last-section {
-      border-bottom: none;
-    }
-
-    h2 {
-      font-size: 1.25rem;
-      color: #333;
-      margin: 0 0 1rem;
-    }
-
-    p {
-      line-height: 1.6;
-      color: #555;
-      margin: 0.75rem 0;
-    }
-
-    ul {
-      margin: 1rem 0;
-      padding-left: 2rem;
-    }
-
-    li {
-      margin: 0.5rem 0;
-      line-height: 1.6;
-      color: #555;
+    h2 { font-size: 1rem; color: #1f2933; margin: 0 0 0.75rem; }
+    p { color: #475467; font-size: 0.875rem; line-height: 1.6; margin: 0.5rem 0; }
+    ul { margin: 0.5rem 0 0.5rem 1.25rem; padding: 0; }
+    li { color: #475467; font-size: 0.875rem; line-height: 1.7; }
+    a { color: #667eea; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: #f2f4f7; padding: 0.1rem 0.35rem;
+      border-radius: 3px; font-size: 0.8rem; color: #344054;
     }
 
     .highlight {
-      background: #e6f7e6;
-      padding: 1rem;
-      border-radius: 4px;
-      border-left: 4px solid #16a34a;
-      margin: 1rem 0;
+      background: #f0fdf4; border-left: 3px solid #16a34a;
+      padding: 0.65rem 1rem; border-radius: 4px;
+      font-size: 0.85rem; color: #15803d; margin-top: 0.75rem;
     }
-
     .warning {
-      background: #fff3e0;
-      padding: 1rem;
-      border-radius: 4px;
-      border-left: 4px solid #ff9800;
-      margin: 1rem 0;
+      background: #fff8e1; border-left: 3px solid #f59e0b;
+      padding: 0.65rem 1rem; border-radius: 4px;
+      font-size: 0.85rem; color: #92400e; margin-top: 0.75rem;
     }
 
-    .promise-box {
-      background: #f0f8ff;
-      padding: 1.5rem;
-      border-radius: 8px;
-      border-left: 4px solid #0066cc;
-    }
-
-    strong {
-      color: #333;
+    .footer-note {
+      color: #667085; font-size: 0.8rem; text-align: center;
+      margin-top: 1.5rem; padding-top: 1rem;
+      border-top: 1px solid #e5ecea;
     }
   `],
 })

@@ -458,17 +458,29 @@ async def model_status(
 async def install_local_model(
     body: ModelActionRequest,
     current_user: User = Depends(get_current_user),
-) -> Dict[str, Any]:
-    if body.model_id not in _RECOMMENDED_LOCAL_MODELS:
-        raise HTTPException(status_code=400, detail="This model is not in the supported local model list")
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=900) as client:
-            response = await client.post(f"{OLLAMA_BASE}/api/pull", json={"name": body.model_id, "stream": False})
-            response.raise_for_status()
-        return {"model_id": body.model_id, "installed": True}
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Could not install the local model. Ensure Ollama is running: {exc}")
+) -> Any:
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    async def _stream():
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=900, write=30, pool=5)) as client:
+                async with client.stream("POST", f"{OLLAMA_BASE}/api/pull", json={"name": body.model_id, "stream": True}) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk = _json.loads(line)
+                            yield f"data: {_json.dumps(chunk)}\n\n"
+                        except Exception:
+                            continue
+            yield f"data: {_json.dumps({'status': 'done'})}\n\n"
+        except Exception as exc:
+            yield f"data: {_json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/models/remove")
@@ -477,9 +489,14 @@ async def remove_local_model(
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     try:
-        import httpx
+        import httpx, json as _json
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.request("DELETE", f"{OLLAMA_BASE}/api/delete", json={"name": body.model_id})
+            response = await client.request(
+                "DELETE",
+                f"{OLLAMA_BASE}/api/delete",
+                content=_json.dumps({"name": body.model_id}),
+                headers={"Content-Type": "application/json"},
+            )
             response.raise_for_status()
         return {"model_id": body.model_id, "removed": True}
     except Exception as exc:
@@ -1577,6 +1594,18 @@ class ItemUpdateRequest(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     tags: Optional[List[str]] = None
     details: Optional[Dict[str, Any]] = None
+
+
+@app.get("/knowledge/items/{item_id}")
+async def get_item(
+    item_id: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Dict[str, Any]:
+    item = await session.get(KnowledgeItem, item_id)
+    if not item or item.workspace_id != current_user.workspace_id:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return _item_dict(item)
 
 
 @app.put("/knowledge/items/{item_id}")

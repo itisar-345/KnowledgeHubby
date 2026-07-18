@@ -73,8 +73,13 @@ export class ReviewComponent implements OnInit {
   ngOnInit() { this.load() }
 
   async load() {
-    const res: any = await firstValueFrom(this.http.get(`${API_BASE}/knowledge/review`, { headers: this.auth.authHeaders() })).catch(() => null)
-    if (res) this.items = res; else this.error = 'Could not load review queue'
+    try {
+      const res: any = await firstValueFrom(this.http.get(`${API_BASE}/knowledge/review`, { headers: this.auth.authHeaders() }))
+      this.items = res
+    } catch (e: any) {
+      this.error = e?.error?.detail || e?.message || 'Could not load review queue'
+      console.error('review load error:', e)
+    }
   }
 
   startEdit(item: ReviewItem) { this.editingId = item.id; this.editTitle = item.title; this.editNote = '' }

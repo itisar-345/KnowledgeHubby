@@ -127,7 +127,7 @@ async def run_airplane_test():
     ])
     check('embed() returns 3 vectors', len(vecs) == 3)
     check('all vectors non-None', all(v is not None for v in vecs))
-    check('all vectors dim=384', all(len(v) == 384 for v in vecs if v))
+    check('all vectors dim=384', len(vecs) > 0 and all(v is not None and len(v) == 384 for v in vecs))
     no_outbound('sentence-transformers embed()')
 
     # ── 3. Regex extraction ───────────────────────────────────────────────────

@@ -1,8 +1,9 @@
-import { Component, OnInit, ViewChild, ElementRef, AfterViewChecked } from '@angular/core'
+import { Component, ViewChild, ElementRef, AfterViewChecked } from '@angular/core'
 import { CommonModule } from '@angular/common'
 import { FormsModule } from '@angular/forms'
 import { HttpClient } from '@angular/common/http'
 import { firstValueFrom } from 'rxjs'
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser'
 import { AuthService, API_BASE } from '../../services/auth.service'
 import { ModelService } from '../../services/model.service'
 
@@ -39,7 +40,7 @@ const PIPELINE_STAGES = [
             Top-K
             <input type="number" min="1" max="20" [(ngModel)]="topK" style="width:52px;padding:0.25rem 0.4rem;font-size:0.8rem" />
           </label>
-          <button (click)="messages = []" title="Clear chat">🗑</button>
+          <button (click)="confirmClear()" title="Clear chat">🗑</button>
         </div>
       </div>
 
@@ -55,7 +56,7 @@ const PIPELINE_STAGES = [
               <strong>{{ m.role === 'user' ? 'You' : 'Assistant' }}</strong>
               <span class="timestamp">{{ fmt(m.ts) }}</span>
             </div>
-            <p style="white-space:pre-wrap;line-height:1.6">{{ m.content }}</p>
+            <div style="line-height:1.6" [innerHTML]="renderMarkdown(m.content)"></div>
             @if (m.role === 'assistant' && m.context_nodes && m.context_nodes.length > 0) {
               <div style="margin-top:0.75rem">
                 <button style="font-size:0.75rem;padding:0.2rem 0.5rem" (click)="toggleCtx(idx)">
@@ -65,11 +66,10 @@ const PIPELINE_STAGES = [
                 @if (expandedCtx === idx) {
                   <div style="margin-top:0.5rem;display:flex;flex-direction:column;gap:0.3rem">
                     @for (n of m.context_nodes; track n.id) {
-                      <div style="background:#f8fbfa;border:1px solid #e5ecea;border-radius:5px;padding:0.4rem 0.6rem;font-size:0.8rem">
-                        <span style="color:#667085;margin-right:0.4rem">[{{ n.id.slice(0,16) }}…]</span>
+                      <div (click)="goToItem(n.id)" style="background:#f8fbfa;border:1px solid #e5ecea;border-radius:5px;padding:0.4rem 0.6rem;font-size:0.8rem;cursor:pointer" title="Open item detail">
                         <strong>{{ n.title || n.label }}</strong>
                         <span style="color:#667085;margin-left:0.4rem">
-                          ({{ n.kind || n.type }}){{ n.score != null ? ' · ' + n.score.toFixed(3) : '' }}{{ n.retrieved_by ? ' · via ' + n.retrieved_by : '' }}
+                          ({{ n.kind || n.type }}){{ n.retrieved_by ? ' · via ' + n.retrieved_by : '' }}
                         </span>
                       </div>
                     }
@@ -102,19 +102,46 @@ const PIPELINE_STAGES = [
       font-weight: 500;
     }
     .provider-green { background: #e6f7e6; color: #1a6b1a; }
-    .provider-blue  { background: #e6f0ff; color: #0033cc; }
+    .provider-blue  { background: #ede9ff; color: #5a3fc0; }
     .provider-red   { background: #ffe6e6; color: #cc0000; }
     .latency-hint   { color: #667085; font-size: 0.75rem; margin-left: 0.5rem; }
   `]
 })
 export class GraphragComponent implements AfterViewChecked {
   @ViewChild('bottomEl') bottomEl!: ElementRef
-  messages: Message[] = []; input = ''; loading = false; topK = 8; expandedCtx: number | null = null
+  messages: Message[] = this._loadMessages(); input = ''; loading = false; topK = 8; expandedCtx: number | null = null
   pipelineStage = ''
   private shouldScroll = false
   private _stageInterval: any = null
 
-  constructor(private http: HttpClient, public auth: AuthService, public modelService: ModelService) {}
+  constructor(private http: HttpClient, public auth: AuthService, public modelService: ModelService, private sanitizer: DomSanitizer) {}
+
+  private _loadMessages(): Message[] {
+    try { return JSON.parse(sessionStorage.getItem('graphrag_messages') || '[]') } catch { return [] }
+  }
+
+  private _saveMessages() {
+    sessionStorage.setItem('graphrag_messages', JSON.stringify(this.messages))
+  }
+
+  confirmClear() {
+    if (this.messages.length === 0 || confirm('Clear conversation history?')) {
+      this.messages = []
+      sessionStorage.removeItem('graphrag_messages')
+    }
+  }
+
+  goToItem(id: string) { window.open(`/knowledge/${id}`, '_blank') }
+
+  renderMarkdown(text: string): SafeHtml {
+    const html = text
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/^- (.+)$/gm, '<li>$1</li>')
+      .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+      .replace(/\n/g, '<br>')
+    return this.sanitizer.bypassSecurityTrustHtml(html)
+  }
 
   ngAfterViewChecked() {
     if (this.shouldScroll) { this.bottomEl?.nativeElement?.scrollIntoView({ behavior: 'smooth' }); this.shouldScroll = false }
@@ -158,6 +185,6 @@ export class GraphragComponent implements AfterViewChecked {
       this.messages.push({ role: 'assistant', content: data.answer, citations: data.citations, context_nodes: data.context_nodes, retrieval_mode: data.retrieval_mode, ts: Date.now() })
     } catch (e: any) {
       this.messages.push({ role: 'assistant', content: `Error: ${e?.message || 'Request failed'}`, ts: Date.now() })
-    } finally { this._stopPipelineProgress(); this.loading = false; this.shouldScroll = true }
+    } finally { this._stopPipelineProgress(); this.loading = false; this.shouldScroll = true; this._saveMessages() }
   }
 }

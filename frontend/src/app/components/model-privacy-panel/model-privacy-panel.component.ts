@@ -1,205 +1,193 @@
 import { Component, EventEmitter, Output } from '@angular/core'
 import { CommonModule } from '@angular/common'
-import { RouterLink } from '@angular/router'
+import { Router } from '@angular/router'
 import { ModelService } from '../../services/model.service'
 
 @Component({
   selector: 'app-model-privacy-panel',
   standalone: true,
-  imports: [CommonModule, RouterLink],
+  imports: [CommonModule],
   template: `
-    <div class="privacy-panel">
+    <div class="panel">
       <div class="panel-header">
-        <h2>Model & Privacy</h2>
-        <button class="close-btn" (click)="close.emit()">✕</button>
+        <span class="panel-title">Model &amp; Privacy</span>
+        <button class="close-btn" (click)="close.emit()" aria-label="Close">✕</button>
       </div>
 
-      <div class="panel-content">
-        <section class="config-section">
-          <h3>Current Configuration</h3>
-          <div class="config-item">
-            <label>LLM Provider:</label>
-            <span class="value">{{ service.currentLlmProvider() }}</span>
-          </div>
-          <div class="config-item">
-            <label>LLM Model:</label>
-            <span class="value">{{ service.currentLlmModel() }}</span>
-          </div>
-          @if (service.modelStatus()?.embedding) {
-            <div class="config-item">
-              <label>Embedding Provider:</label>
-              <span class="value">{{ service.modelStatus()?.embedding?.provider }}</span>
-            </div>
-            <div class="config-item">
-              <label>Embedding Model:</label>
-              <span class="value">{{ service.modelStatus()?.embedding?.model || 'all-MiniLM-L6-v2' }}</span>
-            </div>
-          }
-        </section>
+      <div class="panel-body">
 
-        <section class="config-section">
-          <h3>Cloud Provider Access</h3>
-          <label class="toggle-label">
-            <input type="checkbox" [checked]="service.cloudEnabled()" (change)="toggleCloudProviders($event)" />
-            Allow cloud providers for this workspace
+        <!-- LLM status -->
+        <div class="section">
+          <p class="section-label">LLM</p>
+          <div class="row">
+            <span class="row-key">Provider</span>
+            <span class="pill" [class]="providerClass()">{{ service.currentLlmProvider() }}</span>
+          </div>
+          <div class="row">
+            <span class="row-key">Model</span>
+            <span class="row-val">{{ service.currentLlmModel() }}</span>
+          </div>
+          <div class="row">
+            <span class="row-key">Status</span>
+            @if (service.modelStatus()?.llm?.installed) {
+              <span class="pill pill-green">● Installed</span>
+            } @else {
+              <span class="pill pill-red">● Not installed</span>
+            }
+          </div>
+        </div>
+
+        <!-- Embedding status -->
+        @if (service.modelStatus()?.embedding) {
+          <div class="section">
+            <p class="section-label">Embeddings</p>
+            <div class="row">
+              <span class="row-key">Provider</span>
+              <span class="row-val">{{ service.modelStatus()?.embedding?.provider }}</span>
+            </div>
+            <div class="row">
+              <span class="row-key">Model</span>
+              <span class="row-val">{{ service.modelStatus()?.embedding?.model || 'all-MiniLM-L6-v2' }}</span>
+            </div>
+          </div>
+        }
+
+        <!-- Cloud toggle -->
+        <div class="section">
+          <p class="section-label">Cloud Access</p>
+          <label class="toggle-row">
+            <div class="toggle" [class.on]="service.cloudEnabled()" (click)="toggleCloud()">
+              <div class="toggle-thumb"></div>
+            </div>
+            <span>{{ service.cloudEnabled() ? 'Cloud providers enabled' : 'Local-only mode' }}</span>
           </label>
-          <p class="info-text">Admin-only setting. When disabled, all processing happens on your local machine.</p>
-        </section>
+          <p class="hint">When off, all AI processing stays on this device.</p>
+        </div>
 
-        <section class="config-section">
-          <h3>Actions</h3>
-          <button class="btn-primary" routerLink="/settings/models">
-            Download a local model
+        <!-- Actions -->
+        <div class="section">
+          <p class="section-label">Actions</p>
+          <button class="action-btn" (click)="goTo('/settings/models')">
+            <span>🤖</span> Manage local models
           </button>
-        </section>
+          <button class="action-btn" (click)="goTo('/workspace-settings')">
+            <span>⚙️</span> Workspace settings
+          </button>
+          <button class="action-btn secondary" (click)="goTo('/privacy-policy')">
+            <span>🔒</span> Data privacy policy
+          </button>
+        </div>
 
-        <section class="config-section">
-          <h3>Data Privacy</h3>
-          <a routerLink="/privacy-policy" class="info-link">
-            What data ever leaves this device? →
-          </a>
-          <p class="info-text">Plain language explanation of our data handling practices.</p>
-        </section>
       </div>
     </div>
   `,
   styles: [`
-    .privacy-panel {
-      position: fixed;
-      right: 0;
-      top: 0;
-      bottom: 0;
-      width: 400px;
-      background: white;
-      box-shadow: -2px 0 8px rgba(0, 0, 0, 0.15);
-      z-index: 100;
-      display: flex;
-      flex-direction: column;
-      animation: slideIn 0.3s ease-out;
+    .panel {
+      position: fixed; right: 0; top: 0; bottom: 0; width: 340px;
+      background: #fff; z-index: 100;
+      display: flex; flex-direction: column;
+      box-shadow: -4px 0 24px rgba(0,0,0,0.12);
+      animation: slideIn 0.22s ease-out;
     }
-
-    @keyframes slideIn {
-      from {
-        transform: translateX(100%);
-      }
-      to {
-        transform: translateX(0);
-      }
-    }
+    @keyframes slideIn { from { transform: translateX(100%) } to { transform: none } }
 
     .panel-header {
-      padding: 1.5rem;
-      border-bottom: 1px solid #e0e0e0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid #e5ecea;
+      background: #f8f7ff;
     }
-
-    .panel-header h2 {
-      font-size: 1.25rem;
-      margin: 0;
-    }
-
+    .panel-title { font-weight: 700; font-size: 0.95rem; color: #1f2933; }
     .close-btn {
-      background: none;
-      border: none;
-      font-size: 1.5rem;
-      cursor: pointer;
-      color: #666;
+      background: none; border: none; cursor: pointer;
+      color: #667085; font-size: 1rem; padding: 0.25rem; line-height: 1;
     }
+    .close-btn:hover { color: #1f2933; }
 
-    .panel-content {
-      overflow-y: auto;
-      flex: 1;
-      padding: 1.5rem;
-    }
+    .panel-body { flex: 1; overflow-y: auto; padding: 0.75rem 0; }
 
-    .config-section {
-      margin-bottom: 2rem;
-    }
-
-    .config-section h3 {
-      font-size: 0.875rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #666;
-      margin-bottom: 1rem;
-      font-weight: 600;
-    }
-
-    .config-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 0.75rem 0;
+    .section {
+      padding: 0.75rem 1.25rem;
       border-bottom: 1px solid #f0f0f0;
     }
+    .section:last-child { border-bottom: none; }
 
-    .config-item label {
-      font-weight: 500;
-      color: #333;
+    .section-label {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: #98a2b3; margin: 0 0 0.6rem;
     }
 
-    .config-item .value {
-      color: #0066cc;
-      font-family: monospace;
-      font-size: 0.875rem;
+    .row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.35rem 0;
     }
+    .row-key { font-size: 0.85rem; color: #475467; }
+    .row-val { font-size: 0.85rem; color: #1f2933; font-weight: 500; }
 
-    .toggle-label {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      cursor: pointer;
-      font-weight: 500;
+    .pill {
+      font-size: 0.75rem; font-weight: 600;
+      padding: 0.2rem 0.55rem; border-radius: 999px;
     }
+    .pill-green  { background: #dcfce7; color: #15803d; }
+    .pill-red    { background: #fee2e2; color: #b91c1c; }
+    .pill-purple { background: #ede9ff; color: #5a3fc0; }
+    .pill-blue   { background: #dbeafe; color: #1d4ed8; }
 
-    .toggle-label input {
-      cursor: pointer;
+    .toggle-row {
+      display: flex; align-items: center; gap: 0.75rem;
+      cursor: pointer; font-size: 0.875rem; color: #1f2933; font-weight: 500;
     }
+    .toggle {
+      width: 36px; height: 20px; border-radius: 999px;
+      background: #d1d5db; position: relative;
+      transition: background 0.2s; flex-shrink: 0; cursor: pointer;
+    }
+    .toggle.on { background: #667eea; }
+    .toggle-thumb {
+      position: absolute; top: 2px; left: 2px;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #fff; transition: transform 0.2s;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .toggle.on .toggle-thumb { transform: translateX(16px); }
 
-    .info-text {
-      font-size: 0.875rem;
-      color: #666;
-      margin-top: 0.5rem;
-      line-height: 1.4;
-    }
+    .hint { font-size: 0.78rem; color: #98a2b3; margin: 0.4rem 0 0; line-height: 1.4; }
 
-    .btn-primary {
-      width: 100%;
-      padding: 0.75rem 1rem;
-      background: #0066cc;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-weight: 500;
-      transition: background 0.2s;
+    .action-btn {
+      display: flex; align-items: center; gap: 0.6rem;
+      width: 100%; padding: 0.65rem 0.85rem;
+      background: #f8f7ff; border: 1px solid #e0d9ff;
+      border-radius: 7px; cursor: pointer;
+      font-size: 0.875rem; font-weight: 500; color: #3b2a7a;
+      margin-bottom: 0.5rem; text-align: left;
+      transition: background 0.15s;
     }
-
-    .btn-primary:hover {
-      background: #0052a3;
+    .action-btn:last-child { margin-bottom: 0; }
+    .action-btn:hover { background: #ede9ff; }
+    .action-btn.secondary {
+      background: #f8fbfa; border-color: #e5ecea; color: #344054;
     }
-
-    .info-link {
-      display: block;
-      color: #0066cc;
-      text-decoration: none;
-      font-weight: 500;
-      margin-bottom: 0.5rem;
-    }
-
-    .info-link:hover {
-      text-decoration: underline;
-    }
+    .action-btn.secondary:hover { background: #f0f4f8; }
   `],
 })
 export class ModelPrivacyPanelComponent {
   @Output() close = new EventEmitter<void>()
 
-  constructor(public service: ModelService) {}
+  constructor(public service: ModelService, private router: Router) {}
 
-  toggleCloudProviders(event: any) {
-    this.service.toggleCloudProvider(event.target.checked)
+  providerClass(): string {
+    const p = this.service.currentLlmProvider()
+    if (p === 'local') return 'pill pill-green'
+    if (p === 'cloud') return 'pill pill-blue'
+    return 'pill pill-red'
+  }
+
+  toggleCloud() {
+    this.service.toggleCloudProvider(!this.service.cloudEnabled())
+  }
+
+  goTo(path: string) {
+    this.close.emit()
+    this.router.navigate([path])
   }
 }

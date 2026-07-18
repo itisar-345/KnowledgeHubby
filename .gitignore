@@ -18,6 +18,7 @@ setup/keycloak/realm-rendered.json
 __pycache__/
 *.pyc
 .venv/
+.venv2/
 venv/
 
 # Editor

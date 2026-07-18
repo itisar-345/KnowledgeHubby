@@ -141,11 +141,11 @@ interface ProviderConfig {
   `,
   styles: [`
     .page-shell { max-width: 840px; margin: 2rem auto; padding: 0 1rem }
-    .section-card { background:#fff;border:1px solid #dfe7e5;border-radius:8px;padding:1.25rem;margin-bottom:1.25rem }
+    .section-card { background:rgba(255,255,255,0.97);border:1px solid rgba(255,255,255,0.6);border-radius:10px;box-shadow:0 4px 16px rgba(102,126,234,0.08);padding:1.25rem;margin-bottom:1.25rem }
     .section-card h3 { margin:0 0 1rem;font-size:1rem }
     .form-row { display:flex;flex-direction:column;gap:0.25rem;margin:0.75rem 0 }
     .form-row label { font-size:0.85rem;color:#475467;font-weight:500 }
-    .config-card { background:#f8fbfa;border:1px solid #e5ecea;border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.5rem }
+    .config-card { background:#f8f7ff;border:1px solid #e0d9ff;border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.5rem }
   `]
 })
 export class WorkspaceSettingsComponent {

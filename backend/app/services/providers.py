@@ -92,7 +92,9 @@ class OllamaProvider(LLMProvider):
             }
             if json_mode:
                 payload["format"] = "json"
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=3.0, read=120.0, write=10.0, pool=5.0)
+            ) as client:
                 r = await client.post(f"{OLLAMA_BASE}/api/chat", json=payload)
                 r.raise_for_status()
                 return r.json()["message"]["content"].strip()

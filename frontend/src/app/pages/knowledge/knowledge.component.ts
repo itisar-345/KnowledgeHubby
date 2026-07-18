@@ -35,6 +35,8 @@ type Transform = { x: number; y: number; k: number }
         </div>
       </section>
 
+      <div *ngIf="error" class="error-banner">{{ error }}</div>
+
       <section class="ingest-panel">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:0.75rem">
           <div>
@@ -122,7 +124,7 @@ type Transform = { x: number; y: number; k: number }
           <option value="all">All types</option>
           <option *ngFor="let t of itemTypes" [value]="t">{{ t }}</option>
         </select>
-        <a [routerLink]="['/search']" [queryParams]="query ? {q: query} : {}" style="font-size:0.85rem;align-self:center;color:#0066cc;text-decoration:none">
+        <a [routerLink]="['/search']" [queryParams]="query ? {q: query} : {}" style="font-size:0.85rem;align-self:center;color:#667eea;text-decoration:none">
           Advanced search →
         </a>
       </section>
@@ -440,8 +442,13 @@ export class KnowledgeComponent implements OnInit {
         firstValueFrom(this.http.get(`${API_BASE}/knowledge`, { headers })),
         firstValueFrom(this.http.get(`${API_BASE}/knowledge/graph`, { headers })),
       ])
-      this.data = kr; this.graph = gr; this.posMap.clear()
-    } catch (e: any) { this.error = e?.message || 'Load failed' }
+      this.data = kr
+      this.graph = gr
+      this.posMap.clear()
+    } catch (e: any) {
+      this.error = e?.error?.detail || e?.message || 'Failed to load knowledge'
+      console.error('loadKnowledge error:', e)
+    }
   }
 
   async ingestText() {

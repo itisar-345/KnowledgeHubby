@@ -35,23 +35,29 @@ logger = logging.getLogger(__name__)
 _SYSTEM: Dict[str, str] = {
     "factual": (
         "You are a precise knowledge assistant. "
-        "Answer directly and concisely using ONLY the provided context nodes. "
-        "Cite every fact as [item_id]. Do not hallucinate."
+        "Answer using ONLY the provided context nodes — do not infer, extrapolate, or stitch together implications. "
+        "Every factual claim MUST be directly stated in a context node and cited as [item_id]. "
+        "If the context does not explicitly contain the answer, say so. "
+        "Implying an answer from weak or tangential context is a worse failure than declining to answer."
     ),
     "exploratory": (
         "You are a knowledge assistant helping with open-ended exploration. "
-        "Synthesise insights across the context nodes, highlight connections, "
-        "and cite sources as [item_id]. Acknowledge gaps honestly."
+        "Synthesise ONLY what is explicitly stated across the context nodes — do not infer connections that are not directly supported. "
+        "Cite every claim as [item_id]. "
+        "Acknowledge gaps honestly. "
+        "Implying an answer from weak or tangential context is a worse failure than declining to answer."
     ),
     "comparative": (
         "You are a knowledge assistant specialised in comparison. "
-        "Structure your answer as a comparison across the retrieved items. "
-        "Cite each point as [item_id]."
+        "Compare ONLY what is explicitly stated in the context nodes — do not infer attributes that are not directly present. "
+        "Cite each point as [item_id]. "
+        "If the context does not support a direct comparison, say so rather than implying one."
     ),
     "procedural": (
         "You are a knowledge assistant specialised in step-by-step guidance. "
-        "Present the answer as an ordered procedure using the context nodes. "
-        "Cite each step as [item_id]."
+        "Present steps using ONLY content explicitly found in the context nodes. "
+        "Cite each step as [item_id]. "
+        "Do not fill gaps with assumed or inferred steps — if a step is missing from the context, say so."
     ),
 }
 _SYSTEM["fallback"] = _SYSTEM["factual"]
@@ -452,9 +458,42 @@ async def _generate(
     )
     if content:
         return content
-    # offline fallback — surface context directly
-    preview = context[:600].replace("\n", " ")
-    return f"[LLM unavailable] Relevant context for '{question}':\n{preview}"
+    # offline fallback — only surface items that share keywords with the question
+    _SKIP_DETAIL_KEYS = {"extractor", "evidence", "confidence", "what", "why", "severity"}
+    q_tokens = set(re.findall(r"[a-zA-Z]{3,}", question.lower()))
+    _STOPWORDS = {"the", "and", "for", "are", "was", "what", "who", "how", "why", "when", "this", "that", "with", "from", "have", "not", "your", "you"}
+    q_tokens -= _STOPWORDS
+
+    relevant_lines: List[str] = []
+    in_items_section = False
+    for line in context.splitlines():
+        stripped = line.strip()
+        if stripped == "=== KNOWLEDGE ITEMS ===":
+            in_items_section = True
+            continue
+        if stripped.startswith("==="):
+            in_items_section = False
+            continue
+        if not in_items_section or not stripped:
+            continue
+        if stripped.startswith("["):
+            clean = re.sub(r"^\[[^\]]+\]\s*", "", stripped)
+            clean = re.sub(r"relevance=\S+\s*", "", clean)
+            clean = re.sub(r"^\([^)]+\)\s*", "", clean).strip()
+            if not clean:
+                continue
+            # only include if question tokens overlap with item text
+            item_tokens = set(re.findall(r"[a-zA-Z]{3,}", clean.lower()))
+            if not q_tokens or q_tokens & item_tokens:
+                relevant_lines.append(f"- {clean}")
+        elif ":" in stripped:
+            key = stripped.split(":", 1)[0].strip().lower()
+            if key not in _SKIP_DETAIL_KEYS and relevant_lines:
+                relevant_lines.append(f"  {stripped}")
+
+    if not relevant_lines:
+        return f"**LLM is currently unavailable.** No relevant knowledge was found in your knowledge base for: *{question}*"
+    return "**LLM is currently unavailable.** Relevant items from your knowledge base:\n\n" + "\n".join(relevant_lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -571,6 +610,29 @@ async def graphrag_query(
         }
 
     reranked  = await rerank(question, all_context_nodes, top_n=top_k, workspace=workspace)
+
+    # Drop nodes with negligible RRF scores to avoid surfacing unrelated content
+    _MIN_RRF = 0.005
+    reranked = [n for n in reranked if (n.get("rrf_score") or n.get("score") or 0.0) >= _MIN_RRF] or reranked[:3]
+
+    # Threshold gate — if the best node doesn't clear the confidence floor,
+    # the context is too weak to ground a reliable answer. Fail loudly rather
+    # than letting the LLM stitch together an implied response from noise.
+    _CONFIDENCE_FLOOR = 0.02
+    top_score = (reranked[0].get("rrf_score") or reranked[0].get("score") or 0.0) if reranked else 0.0
+    if top_score < _CONFIDENCE_FLOOR:
+        return {
+            "answer": "The retrieved context does not contain sufficiently relevant information to answer this question reliably. Please add more relevant artifacts or rephrase your query.",
+            "citations": [],
+            "context_nodes": reranked,
+            "summaries": summaries_used,
+            "route": route,
+            "sub_queries": sub_queries,
+            "hyde_doc": hyde_doc,
+            "retrieval_mode": retrieval_mode,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+        }
+
     primary   = [n for n in reranked if "graph" not in n.get("retrieved_by", "")]
     graph_nbr = [n for n in reranked if "graph" in n.get("retrieved_by", "")]
 

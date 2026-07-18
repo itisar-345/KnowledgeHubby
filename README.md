@@ -302,3 +302,4 @@ The knowledge graph on the hub page supports:
 - **Docker**: Neo4j runs as the primary store; `backend/data` is mounted for SQLite persistence across container rebuilds.
 - **SQLite fallback**: set `STORAGE_BACKEND=sqlite` to bypass Neo4j entirely without code changes.
 - **OKF import/export**: API endpoints (`POST /knowledge/okf/import`, `GET /knowledge/okf/export`) are fully implemented. A frontend UI for file-based transfer is a planned Should-Have (useful for air-gapped workspace migration).
+a

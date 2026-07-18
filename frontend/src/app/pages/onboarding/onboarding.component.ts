@@ -289,7 +289,7 @@ export class OnboardingComponent implements OnInit {
     return this.recommendedForSystem.find(m => m.id === this.selectedModel)?.size ?? ''
   }
 
-  constructor(private service: ModelService, private router: Router, private auth: AuthService) {}
+  constructor(readonly service: ModelService, private router: Router, private auth: AuthService) {}
 
   ngOnInit() { this.service.loadSystemInfo() }
 

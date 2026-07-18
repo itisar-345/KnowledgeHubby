@@ -130,7 +130,7 @@ type RelatedItem = { item: KnowledgeItem; score: number }
           <div class="relationship-table">
             <div *ngFor="let r of relatedItems" style="grid-template-columns:80px minmax(0,1fr) 60px">
               <span class="type-pill" style="font-size:0.72rem">{{ r.item.type }}</span>
-              <a [routerLink]="['/knowledge', r.item.id]" style="color:#0066cc;text-decoration:none;font-weight:500;font-size:0.875rem">{{ r.item.title }}</a>
+              <a [routerLink]="['/knowledge', r.item.id]" style="color:#667eea;text-decoration:none;font-weight:500;font-size:0.875rem">{{ r.item.title }}</a>
               <span style="color:#667085;font-size:0.75rem;text-align:right">{{ (r.score * 100).toFixed(0) }}%</span>
             </div>
           </div>
@@ -152,8 +152,8 @@ type RelatedItem = { item: KnowledgeItem; score: number }
       font-family: inherit; font-size: 0.875rem; padding: 0.6rem 0.75rem;
     }
     .form-row input:focus, .form-row textarea:focus {
-      outline: none; border-color: #0066cc;
-      box-shadow: 0 0 0 3px rgba(0,102,204,0.1);
+      outline: none; border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102,126,234,0.15);
     }
   `]
 })
@@ -167,7 +167,7 @@ export class KnowledgeDetailComponent implements OnInit {
   private crossLinks: CrossLink[] = []
 
   get item(): KnowledgeItem | undefined {
-    return this.data?.knowledge_items?.find((i: KnowledgeItem) => i.id === this.id)
+    return this.data?._item || this.data?.knowledge_items?.find((i: KnowledgeItem) => i.id === this.id)
   }
   get artifact(): Artifact | undefined {
     return this.data?.artifacts?.find((a: Artifact) => a.id === this.item?.artifact_id)
@@ -203,11 +203,13 @@ export class KnowledgeDetailComponent implements OnInit {
   async load() {
     try {
       const headers = this.auth.authHeaders()
-      const [kr, lr]: any[] = await Promise.all([
-        firstValueFrom(this.http.get(`${API_BASE}/knowledge`, { headers })),
+      const [item, lr, kr]: any[] = await Promise.all([
+        firstValueFrom(this.http.get(`${API_BASE}/knowledge/items/${this.id}`, { headers })),
         firstValueFrom(this.http.get(`${API_BASE}/knowledge/links`, { headers })).catch(() => []),
+        firstValueFrom(this.http.get(`${API_BASE}/knowledge`, { headers })),
       ])
-      this.data = kr; this.crossLinks = lr || []
+      this.data = { ...kr, _item: item }
+      this.crossLinks = lr || []
     } catch (e: any) { this.error = e?.message || 'Could not load knowledge item' }
   }
 
